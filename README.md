@@ -30,7 +30,7 @@ builder code, including the zero bytes32 value, which means no attribution.
 `builder_mode=true` requires a nonzero code. Market discovery uses the configured site's active event list.
 
 The source distribution is named `kuest-sdk`; Python imports remain `market_sdk`.
-The distribution has not been published to PyPI.
+The distribution is published as [`kuest-sdk`](https://pypi.org/project/kuest-sdk/). Install it with `pip install kuest-sdk` and import it as `market_sdk`.
 
 ## Read-only example
 
