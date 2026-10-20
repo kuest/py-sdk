@@ -20,7 +20,7 @@
 
 ## SDK Design
 
-- Keep the neutral distribution name `market-sdk` and import package `market_sdk` unless explicitly changed.
+- The public GitHub distribution is `kuest-sdk`; the operator ZIP rewrites the distribution name to `market-sdk`. Keep the import package `market_sdk` in both channels.
 - When implementing new areas where guidance is vague, choose the most idiomatic Python approach but avoid premature abstractions.
 - Prefer simple, direct code until there is a concrete repeated use case or public API need that justifies a helper, wrapper, protocol, base class, or configuration abstraction.
 - Do not copy TypeScript SDK shapes mechanically; preserve feature parity while adapting APIs to Python ecosystem norms and the smallest useful surface.

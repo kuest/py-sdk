@@ -353,7 +353,7 @@ def _require_pyarrow():  # noqa: ANN202
     except ImportError as e:  # pragma: no cover
         raise MissingOptionalDependencyError(
             "market_sdk.frames requires pyarrow. "
-            "Install via `pip install market-sdk[arrow]` (or "
+            "Install via `pip install kuest-sdk[arrow]` (or "
             "`[pandas]` / `[polars]` / `[quant]`)."
         ) from e
     return pa

@@ -87,14 +87,14 @@ def _require_polars():  # noqa: ANN202
     except ImportError as e:  # pragma: no cover
         raise MissingOptionalDependencyError(
             "market_sdk.frames.to_polars() requires pyarrow. "
-            "Install via `pip install market-sdk[polars]`."
+            "Install via `pip install kuest-sdk[polars]`."
         ) from e
     try:
         import polars as pl
     except ImportError as e:  # pragma: no cover
         raise MissingOptionalDependencyError(
             "market_sdk.frames.to_polars() requires polars. "
-            "Install via `pip install market-sdk[polars]`."
+            "Install via `pip install kuest-sdk[polars]`."
         ) from e
     return pl
 

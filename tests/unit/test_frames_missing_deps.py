@@ -69,11 +69,11 @@ def test_error_message_includes_install_hint(
         lambda: (_ for _ in ()).throw(
             MissingOptionalDependencyError(
                 "market_sdk.frames.to_pandas() requires pandas. Install via "
-                "`pip install market-sdk[pandas]`."
+                "`pip install kuest-sdk[pandas]`."
             )
         ),
     )
-    with pytest.raises(MissingOptionalDependencyError, match=r"market-sdk\[pandas\]"):
+    with pytest.raises(MissingOptionalDependencyError, match=r"kuest-sdk\[pandas\]"):
         to_pandas(_Tiny(n=1, v=Decimal("1")))
 
 

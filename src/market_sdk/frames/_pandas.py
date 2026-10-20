@@ -88,14 +88,14 @@ def _require_pandas_stack():  # noqa: ANN202
     except ImportError as e:  # pragma: no cover
         raise MissingOptionalDependencyError(
             "market_sdk.frames.to_pandas() requires pyarrow. "
-            "Install via `pip install market-sdk[pandas]`."
+            "Install via `pip install kuest-sdk[pandas]`."
         ) from e
     try:
         import pandas as pd
     except ImportError as e:  # pragma: no cover
         raise MissingOptionalDependencyError(
             "market_sdk.frames.to_pandas() requires pandas. "
-            "Install via `pip install market-sdk[pandas]`."
+            "Install via `pip install kuest-sdk[pandas]`."
         ) from e
     return pa, pd
 
