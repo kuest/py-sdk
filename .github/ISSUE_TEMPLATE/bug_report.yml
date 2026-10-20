@@ -1,0 +1,52 @@
+name: Bug report
+description: Report broken behavior, install failures, regressions, or incorrect Python behavior.
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug in the Python SDK.
+
+        Please do not report security vulnerabilities in public issues.
+  - type: input
+    id: package-version
+    attributes:
+      label: SDK package and version
+      description: Include the package name and version from your package manager.
+      placeholder: "market-sdk==0.13.0"
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      description: Include your Python version, environment manager, and package manager.
+      placeholder: "Python 3.12.8, uv 0.7.0"
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the broken behavior or regression.
+      placeholder: "The SDK throws when..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest code sample or steps that reproduce the issue.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected behavior, actual behavior, or logs
+      description: Add expected behavior, actual behavior, errors, or logs if helpful.
+    validations:
+      required: false

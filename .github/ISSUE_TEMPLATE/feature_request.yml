@@ -1,0 +1,35 @@
+name: Feature request
+description: Request a new SDK capability, API improvement, or developer experience enhancement.
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the Python SDK.
+
+        Please focus this request on the SDK behavior or API surface you want to use.
+  - type: textarea
+    id: request
+    attributes:
+      label: What would you like the SDK to support?
+      description: Describe the new capability, API change, or developer experience improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Why do you need this?
+      description: Describe the use case or current limitation.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Example API or additional context
+      description: Optional code sample, workaround, or related context.
+      render: python
+    validations:
+      required: false

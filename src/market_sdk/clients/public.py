@@ -1,0 +1,1421 @@
+"""Synchronous public SDK client."""
+
+import logging
+from collections.abc import Sequence
+from datetime import datetime
+from decimal import Decimal
+from types import TracebackType
+from typing import Literal, Self, overload
+
+from market_sdk._internal.actions import clob as _clob_actions
+from market_sdk._internal.actions import data as _data_actions
+from market_sdk._internal.actions import gamma as _gamma_actions
+from market_sdk._internal.actions import rewards as _rewards_actions
+from market_sdk._internal.actions import rfq as _rfq_actions
+from market_sdk._internal.actions.gamma import (
+    CommentParentEntityType,
+    DateFilter,
+    Recurrence,
+    SearchSort,
+    TagMatch,
+    TimestampFilter,
+)
+from market_sdk._internal.actions.orders.estimate import (
+    estimate_market_price_sync as _estimate_market_price_sync,
+)
+from market_sdk._internal.actions.orders.types import MarketOrderType
+from market_sdk._internal.actions.relayer.approvals import build_get_trading_approvals_state_spec
+from market_sdk._internal.context import SyncClientContext
+from market_sdk._internal.dispatch import (
+    sync_dispatch,
+    sync_paginate_keyset,
+    sync_paginate_keyset_or_resume_offset,
+    sync_paginate_offset,
+    sync_paginate_page_based,
+)
+from market_sdk._internal.environment import get_environment_config
+from market_sdk.clients._transport import SyncTransport
+from market_sdk.environments import PRODUCTION, Environment
+from market_sdk.errors import RequestRejectedError, UserInputError
+from market_sdk.models import (
+    ComboMarket,
+    Comment,
+    Event,
+    LastTradePrice,
+    LastTradePriceForAsset,
+    Market,
+    MarketResolutionStatus,
+    OrderBook,
+    OrderSide,
+    PriceRequest,
+    ProtocolVersion,
+    PublicProfile,
+    RelatedTag,
+    SearchResults,
+    Series,
+    SportsMarketTypes,
+    SportsMetadata,
+    Tag,
+    TagReference,
+    Team,
+    TradingApprovalsState,
+)
+from market_sdk.models.clob import BuilderTrade
+from market_sdk.models.clob.rewards import CurrentReward, MarketReward, RebatedFee
+from market_sdk.models.data import (
+    Activity,
+    ActivityTypeFilter,
+    BuilderStanding,
+    BuilderVolumeInterval,
+    BuilderVolumePoint,
+    ComboActivity,
+    ComboBiggestWinner,
+    ComboPosition,
+    ComboPositionSortBy,
+    ComboPositionStatusFilter,
+    LeaderboardWindow,
+    LiveVolume,
+    MarketBiggestWinner,
+    MetaHolder,
+    OpenInterest,
+    PortfolioValue,
+    Position,
+    PositionFilterType,
+    PositionSortBy,
+    PositionStatusFilter,
+    PriceHistoryInterval,
+    PriceHistoryPoint,
+    Resolution,
+    SortDirection,
+    TokenReference,
+    Trade,
+    TradeFilterType,
+    TraderLeaderboardEntry,
+    TraderLeaderboardSort,
+    TraderLeaderboardStanding,
+    UserPnlFidelityInput,
+    UserPnlIntervalInput,
+    UserPnlSeries,
+    UserStats,
+    UserVolume,
+)
+from market_sdk.models.types import ClobAssetId, CtfConditionId
+from market_sdk.pagination import Page, Paginator
+from market_sdk.site_scope import scope_market_paginator
+
+
+class PublicClient:
+    """Client for public SDK data workflows.
+
+    Public methods return stable, idiomatic Python SDK objects.
+    """
+
+    def list_trades(
+        self,
+        *,
+        user: str | None = None,
+        condition_id: str | Sequence[str] | None = None,
+        event_id: int | Sequence[int] | None = None,
+        side: OrderSide | None = None,
+        taker_only: bool | None = None,
+        filter_type: TradeFilterType | None = None,
+        filter_amount: float | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+        page_size: int = 100,
+    ) -> Paginator[Trade]:
+        """List trades. Size is shares and price is USDC per share.
+
+        Time filters apply when a user is supplied. ``full_history`` selects all history.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_trades_spec(
+            user=user,
+            condition_id=condition_id,
+            event_id=event_id,
+            side=side,
+            taker_only=taker_only,
+            filter_type=filter_type,
+            filter_amount=filter_amount,
+            start=start,
+            end=end,
+            full_history=full_history,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_activity(
+        self,
+        *,
+        user: str,
+        condition_id: str | Sequence[str] | None = None,
+        event_id: int | Sequence[int] | None = None,
+        activity_types: Sequence[ActivityTypeFilter] | None = None,
+        side: OrderSide | None = None,
+        sort_direction: SortDirection | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+        page_size: int = 100,
+    ) -> Paginator[Activity]:
+        """List wallet activity, including deposits and withdrawals.
+
+        Amounts are USDC and shares are outcome units.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_activity_spec(
+            user=user,
+            condition_id=condition_id,
+            event_id=event_id,
+            activity_types=activity_types,
+            side=side,
+            sort_direction=sort_direction,
+            start=start,
+            end=end,
+            full_history=full_history,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_combo_activity(
+        self,
+        *,
+        user: str,
+        condition_id: str | Sequence[str] | None = None,
+        page_size: int = 100,
+    ) -> Paginator[ComboActivity]:
+        """List combo lifecycle activity. Amounts and payouts are USDC.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_combo_activity_spec(user=user, condition_id=condition_id)
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_positions(
+        self,
+        *,
+        user: str | None = None,
+        condition_id: str | Sequence[str] | None = None,
+        status: PositionStatusFilter | None = None,
+        event_id: int | Sequence[int] | None = None,
+        title: str | None = None,
+        filter_type: PositionFilterType | None = None,
+        filter_amount: float | None = None,
+        include_archived: bool | None = None,
+        sort_by: PositionSortBy | None = None,
+        sort_direction: SortDirection | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+        page_size: int = 100,
+    ) -> Paginator[Position]:
+        """List positions for a wallet or a single market.
+
+        Use ``status="CLOSED"`` for closed positions. Sizes are shares and values are USDC.
+
+        ``status="REDEEMABLE_LOST"`` lists still-held positions that resolved to a zero
+        payout. ``status="MERGEABLE"`` lists live complementary pairs. Both require
+        ``user`` and are filters only: a lost position still reports ``REDEEMABLE`` and a
+        mergeable one ``OPEN``. ``sort_by`` defaults to ``TOKENS`` for ``MERGEABLE``,
+        ``REALIZED_PNL`` for ``CLOSED``, and ``CURRENT_VALUE`` for every other status.
+
+        For wallet-anchored ``CLOSED`` listings, ``TOKENS``, ``CURRENT_VALUE``, ``PRICE``
+        and ``UNREALIZED_PNL`` sort by realized PnL in the requested direction. Keep
+        the original filters and requested sort when resuming a cursor. If an older
+        cursor is rejected with HTTP 400 because the ordering changed, discard it
+        and explicitly fetch a new first page; the paginator does not restart.
+
+        ``title`` filters by case-insensitive substring (max 200 Unicode characters).
+        ``%`` and ``_`` remain wildcards. Blank input is ignored; other patterns are
+        preserved unchanged on every page, including cursor replay.
+
+        Positions have no time bounds by default. ``full_history=True`` also includes
+        holdings without activity and cannot be combined with ``start`` or ``end``.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_positions_spec(
+            user=user,
+            condition_id=condition_id,
+            status=status,
+            event_id=event_id,
+            title=title,
+            filter_type=filter_type,
+            filter_amount=filter_amount,
+            include_archived=include_archived,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            start=start,
+            end=end,
+            full_history=full_history,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_combo_positions(
+        self,
+        *,
+        user: str,
+        condition_id: str | Sequence[str] | None = None,
+        status: ComboPositionStatusFilter | Sequence[ComboPositionStatusFilter] | None = None,
+        sort_by: ComboPositionSortBy | None = None,
+        sort_direction: SortDirection | None = None,
+        updated_after: int | datetime | None = None,
+        updated_before: int | datetime | None = None,
+        page_size: int = 100,
+    ) -> Paginator[ComboPosition]:
+        """List combo positions, optionally filtering by multiple statuses.
+
+        Update bounds are inclusive. Sizes are shares; costs and payouts are USDC.
+
+        Zero is a valid update bound. Without a status filter, supplying either bound
+        selects the synchronization view, which also includes positions no longer held.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_combo_positions_spec(
+            user=user,
+            condition_id=condition_id,
+            status=status,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            updated_after=updated_after,
+            updated_before=updated_before,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_portfolio_value(
+        self,
+        *,
+        user: str,
+        condition_ids: str | Sequence[str] | None = None,
+    ) -> PortfolioValue:
+        """Get current portfolio value in USDC."""
+        spec = _data_actions.build_get_portfolio_value_spec(user=user, condition_ids=condition_ids)
+        return sync_dispatch(self._ctx, spec)
+
+    def get_user_stats(
+        self,
+        *,
+        user: str,
+    ) -> UserStats | None:
+        """Get wallet statistics, or ``None`` when the wallet has no statistics."""
+        spec = _data_actions.build_get_user_stats_spec(user=user)
+        return sync_dispatch(self._ctx, spec)
+
+    def get_user_pnl(
+        self,
+        *,
+        user: str,
+        interval: UserPnlIntervalInput | None = None,
+        fidelity: UserPnlFidelityInput | None = None,
+    ) -> UserPnlSeries:
+        """Get cumulative wallet PnL in USDC and volume in shares."""
+        spec = _data_actions.build_get_user_pnl_spec(
+            user=user, interval=interval, fidelity=fidelity
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def get_user_volume(
+        self,
+        *,
+        user: str,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+    ) -> UserVolume:
+        """Get trading volume in shares and USDC. Time bounds are floored to UTC days."""
+        spec = _data_actions.build_get_user_volume_spec(
+            user=user, start=start, end=end, full_history=full_history
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def list_market_holders(
+        self,
+        *,
+        condition_ids: str | Sequence[str],
+        min_balance: float | None = None,
+        include_pnl: bool | None = None,
+        page_size: int = 100,
+    ) -> Paginator[MetaHolder]:
+        """List holders grouped by outcome asset. Amounts are shares; PnL is USDC.
+
+        Page size applies per outcome. Merge groups across pages by ``asset_id``.
+        With ``include_pnl=True``, the maximum page size is 100; amounts are gross per side.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.build_list_market_holders_spec(
+            condition_ids=condition_ids, min_balance=min_balance, include_pnl=include_pnl
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_open_interests(
+        self,
+        *,
+        condition_ids: str | Sequence[str] | None = None,
+    ) -> tuple[OpenInterest, ...]:
+        """Get open interest in USDC. Omit conditions to request global interest."""
+        spec = _data_actions.get_open_interests_spec(condition_ids=condition_ids)
+        return sync_dispatch(self._ctx, spec)
+
+    def get_event_live_volume(
+        self,
+        *,
+        event_ids: int | Sequence[int],
+    ) -> LiveVolume:
+        """Get combined event taker volume in shares with a market breakdown."""
+        spec = _data_actions.build_get_event_live_volume_spec(event_ids=event_ids)
+        return sync_dispatch(self._ctx, spec)
+
+    def list_price_history(
+        self,
+        *,
+        asset_id: str,
+        interval: PriceHistoryInterval | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        as_of: int | datetime | None = None,
+        bucket_seconds: int | None = None,
+        page_size: int | None = None,
+    ) -> Paginator[PriceHistoryPoint]:
+        """List historical prices in USDC per share, oldest first.
+
+        Select an interval, a start/end window (end exclusive), or an exact ``as_of``.
+        Windows span at most 15 days. ``as_of`` forbids bucket_seconds and page_size.
+        The default page size is 10000.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.build_list_price_history_spec(
+            asset_id=asset_id,
+            interval=interval,
+            start=start,
+            end=end,
+            as_of=as_of,
+            bucket_seconds=bucket_seconds,
+            page_size=page_size,
+        )
+        return sync_paginate_keyset(
+            self._ctx, spec, page_size=10000 if page_size is None else page_size
+        )
+
+    def get_token_references(
+        self,
+        *,
+        asset_ids: str | Sequence[str] | None = None,
+        condition_ids: str | Sequence[str] | None = None,
+    ) -> tuple[TokenReference, ...]:
+        """Get outcome asset reference and settlement metadata as a direct tuple.
+
+        Provide exactly one selector family: up to 50 distinct decimal asset IDs,
+        or up to 10 distinct 31-byte or 32-byte hex condition selectors. A scalar
+        string denotes one ID. Elements are trimmed, blanks dropped, and duplicates
+        removed in first-seen order. Decimal IDs have leading zeros stripped and
+        at most 78 remaining digits. Conditions are lowercased without padding.
+
+        Unknown selectors contribute no rows. Asset lookups retain request order;
+        condition groups retain server order and can repeat assets when selectors
+        overlap. Nullable metadata is explicit. Outcome labels and settlement
+        metadata may lag by up to a minute. Transient rate limits are retried.
+        """
+        spec = _data_actions.build_get_token_references_spec(
+            asset_ids=asset_ids, condition_ids=condition_ids
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def get_resolutions(
+        self,
+        *,
+        question_id: str | None = None,
+        condition_ids: str | Sequence[str] | None = None,
+        event_ids: int | Sequence[int] | None = None,
+    ) -> tuple[Resolution, ...]:
+        """Get resolutions by question, conditions, or events. Missing rows are omitted."""
+        spec = _data_actions.build_get_resolutions_spec(
+            question_id=question_id, condition_ids=condition_ids, event_ids=event_ids
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def list_trader_leaderboard(
+        self,
+        *,
+        category: str | None = None,
+        window: LeaderboardWindow | None = None,
+        sort_by: TraderLeaderboardSort | None = None,
+        page_size: int = 100,
+    ) -> Paginator[TraderLeaderboardEntry]:
+        """List ranked traders. PnL is USDC and volume is shares; ranks can tie and skip.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_trader_leaderboard_spec(
+            category=category, window=window, sort_by=sort_by
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_trader_leaderboard_standing(
+        self,
+        *,
+        user: str,
+        category: str | None = None,
+        window: LeaderboardWindow | None = None,
+    ) -> TraderLeaderboardStanding | None:
+        """Get wallet leaderboard standings, or ``None`` when unavailable.
+
+        PnL is USDC and volume is shares. Unranked ranks are ``None``."""
+        spec = _data_actions.build_get_trader_leaderboard_standing_spec(
+            user=user, category=category, window=window
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def list_biggest_winners(
+        self,
+        *,
+        category: str | None = None,
+        window: LeaderboardWindow | None = None,
+        page_size: int = 100,
+    ) -> Paginator[MarketBiggestWinner | ComboBiggestWinner]:
+        """List winning market and combo positions, ordered by USDC PnL.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.build_list_biggest_winners_spec(category=category, window=window)
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_builder_leaderboard(
+        self,
+        *,
+        window: LeaderboardWindow | None = None,
+        page_size: int = 100,
+    ) -> Paginator[BuilderStanding]:
+        """List ranked builders and their trading volume in shares.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_builder_leaderboard_spec(window=window)
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_builder_volumes(
+        self,
+        *,
+        interval: BuilderVolumeInterval | None = None,
+        bucket_limit: int | None = None,
+    ) -> tuple[BuilderVolumePoint, ...]:
+        """Get builder volume in shares by calendar bucket.
+
+        ``bucket_limit`` counts dates, not rows (default 30, maximum 90).
+        Interval ``all`` yields calendar-year buckets."""
+        spec = _data_actions.get_builder_volumes_spec(interval=interval, bucket_limit=bucket_limit)
+        return sync_dispatch(self._ctx, spec)
+
+    def __init__(
+        self,
+        environment: Environment = PRODUCTION,
+        *,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        config = get_environment_config(environment)
+        self._ctx = SyncClientContext(
+            environment=environment,
+            _resolved_environment_config=config,
+            gamma=SyncTransport(base_url=config.gamma_url, logger=logger),
+            data=SyncTransport(base_url=config.data_url, logger=logger),
+            rfq=SyncTransport(base_url=config.rfq_url, logger=logger),
+            clob=SyncTransport(base_url=config.clob_url, logger=logger),
+        )
+
+    @property
+    def environment(self) -> Environment:
+        """Environment this client sends requests to."""
+        return self._ctx.environment
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the underlying network transports."""
+        try:
+            self._ctx.gamma.close()
+        finally:
+            try:
+                self._ctx.data.close()
+            finally:
+                try:
+                    self._ctx.rfq.close()
+                finally:
+                    self._ctx.clob.close()
+
+    @overload
+    def get_market(
+        self, *, id: str, include_tag: bool | None = None, locale: str | None = None
+    ) -> Market: ...
+    @overload
+    def get_market(
+        self, *, slug: str, include_tag: bool | None = None, locale: str | None = None
+    ) -> Market: ...
+    @overload
+    def get_market(
+        self, *, url: str, include_tag: bool | None = None, locale: str | None = None
+    ) -> Market: ...
+    def get_market(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        url: str | None = None,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+    ) -> Market:
+        """Get a market.
+
+        Markets that cannot be represented by the binary Market model raise
+        UnexpectedResponseError.
+        """
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_market_spec(
+                id=id, slug=slug, url=url, include_tag=include_tag, locale=locale
+            ),
+        )
+
+    def get_market_tags(self, id: str) -> tuple[TagReference, ...]:
+        """Get a market's tags."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_market_tags_spec(id))
+
+    @overload
+    def get_event(
+        self,
+        *,
+        id: str,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event: ...
+    @overload
+    def get_event(
+        self,
+        *,
+        slug: str,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event: ...
+    @overload
+    def get_event(
+        self,
+        *,
+        url: str,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event: ...
+    def get_event(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        url: str | None = None,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event:
+        """Get an event."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_event_spec(
+                id=id,
+                slug=slug,
+                url=url,
+                include_best_lines=include_best_lines,
+                include_chat=include_chat,
+                include_template=include_template,
+                locale=locale,
+            ),
+        )
+
+    def get_event_tags(self, id: str) -> tuple[TagReference, ...]:
+        """Get an event's tags."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_event_tags_spec(id))
+
+    def get_series(
+        self,
+        id: str,
+        *,
+        locale: str | None = None,
+    ) -> Series:
+        """Get a series."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_series_spec(id, locale=locale),
+        )
+
+    @overload
+    def get_tag(
+        self, *, id: str, include_template: bool | None = None, locale: str | None = None
+    ) -> Tag: ...
+    @overload
+    def get_tag(self, *, slug: str, locale: str | None = None) -> Tag: ...
+    def get_tag(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Tag:
+        """Get a tag."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_tag_spec(
+                id=id,
+                slug=slug,
+                include_template=include_template,
+                locale=locale,
+            ),
+        )
+
+    def get_related_tags(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        omit_empty: bool | None = None,
+        status: str | None = None,
+    ) -> tuple[RelatedTag, ...]:
+        """Get related tag relationships."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_related_tags_spec(
+                id=id, slug=slug, omit_empty=omit_empty, status=status
+            ),
+        )
+
+    def get_related_tag_resources(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        locale: str | None = None,
+        omit_empty: bool | None = None,
+        status: str | None = None,
+    ) -> tuple[Tag, ...]:
+        """Get tag resources linked from related tag relationships."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_related_tag_resources_spec(
+                id=id, slug=slug, locale=locale, omit_empty=omit_empty, status=status
+            ),
+        )
+
+    def get_sports(self) -> tuple[SportsMetadata, ...]:
+        """Get available sports metadata."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_sports_spec())
+
+    def get_sports_market_types(self) -> SportsMarketTypes:
+        """Get available sports market types."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_sports_market_types_spec())
+
+    def get_public_profile(self, address: str) -> PublicProfile | None:
+        """Get a public profile by wallet address. Returns None if no profile exists."""
+        try:
+            return sync_dispatch(self._ctx, _gamma_actions.get_public_profile_spec(address))
+        except RequestRejectedError as error:
+            if error.status == 404:
+                return None
+            raise
+
+    def get_trading_approvals_state(self, *, wallet: str) -> TradingApprovalsState:
+        """Get the trading approvals that a wallet still needs to grant.
+
+        Recent grants or revocations can take time to appear. Reads use indexed
+        state from the configured environment, not the RPC endpoint.
+        """
+        return sync_dispatch(
+            self._ctx,
+            build_get_trading_approvals_state_spec(
+                wallet=wallet, config=self._ctx.environment_config
+            ),
+        )
+
+    def get_comment_thread(
+        self, id: str, *, get_positions: bool | None = None
+    ) -> tuple[Comment, ...]:
+        """Get a comment thread by comment ID."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_comment_thread_spec(id, get_positions=get_positions),
+        )
+
+    def list_builder_trades(
+        self,
+        *,
+        builder_code: str,
+        market: str | None = None,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        id: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> Paginator[BuilderTrade]:
+        """Unavailable until the CLOB filters ``/builder/trades`` by builder code."""
+
+        raise UserInputError(
+            "Builder trade filtering is unavailable: the CLOB /builder/trades route "
+            "ignores builder_code."
+        )
+
+    def download_accounting_snapshot(self, *, user: str) -> bytes:
+        """Download the accounting snapshot archive for a user."""
+        path, params = _data_actions.build_accounting_snapshot_request(user=user)
+        return self._ctx.data.get_bytes(path, params=params)
+
+    def list_events(
+        self,
+        *,
+        ascending: bool | None = None,
+        closed: bool = False,
+        cyom: bool | None = None,
+        end_date_max: TimestampFilter | None = None,
+        end_date_min: TimestampFilter | None = None,
+        ended: bool | None = None,
+        event_date: DateFilter | None = None,
+        event_week: int | None = None,
+        exclude_tag_ids: int | Sequence[int] | None = None,
+        featured: bool | None = None,
+        featured_order: bool | None = None,
+        game_ids: int | Sequence[int] | None = None,
+        ids: int | Sequence[int] | None = None,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_children: bool | None = None,
+        include_template: bool | None = None,
+        liquidity_max: float | None = None,
+        liquidity_min: float | None = None,
+        live: bool | None = None,
+        locale: str | None = None,
+        order: str | None = None,
+        parent_event_id: int | None = None,
+        partner_slug: str | None = None,
+        recurrence: Recurrence | None = None,
+        related_tags: bool | None = None,
+        series_ids: int | Sequence[int] | None = None,
+        slug: str | Sequence[str] | None = None,
+        start_date_max: TimestampFilter | None = None,
+        start_date_min: TimestampFilter | None = None,
+        start_time_max: TimestampFilter | None = None,
+        start_time_min: TimestampFilter | None = None,
+        tag_ids: int | Sequence[int] | None = None,
+        tag_match: TagMatch | None = None,
+        tag_slug: str | None = None,
+        title_search: str | None = None,
+        volume_max: float | None = None,
+        volume_min: float | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Event]:
+        """List events.
+
+        Defaults to open events. Pass ``closed=True`` to list settled events.
+
+        Returns:
+            A paginator over matching events.
+
+        Examples:
+            Fetch the first page::
+
+                paginator = client.list_events(page_size=10)
+                first_page = paginator.first_page()
+
+            Iterate over all pages::
+
+                for page in client.list_events(page_size=10):
+                    for event in page.items:
+                        print(event.title)
+        """
+        spec = _gamma_actions.list_events_spec(
+            ascending=ascending,
+            closed=closed,
+            cyom=cyom,
+            end_date_max=end_date_max,
+            end_date_min=end_date_min,
+            ended=ended,
+            event_date=event_date,
+            event_week=event_week,
+            exclude_tag_ids=exclude_tag_ids,
+            featured=featured,
+            featured_order=featured_order,
+            game_ids=game_ids,
+            ids=ids,
+            include_best_lines=include_best_lines,
+            include_chat=include_chat,
+            include_children=include_children,
+            include_template=include_template,
+            liquidity_max=liquidity_max,
+            liquidity_min=liquidity_min,
+            live=live,
+            locale=locale,
+            order=order,
+            parent_event_id=parent_event_id,
+            partner_slug=partner_slug,
+            recurrence=recurrence,
+            related_tags=related_tags,
+            series_ids=series_ids,
+            slug=slug,
+            start_date_max=start_date_max,
+            start_date_min=start_date_min,
+            start_time_max=start_time_max,
+            start_time_min=start_time_min,
+            tag_ids=tag_ids,
+            tag_match=tag_match,
+            tag_slug=tag_slug,
+            title_search=title_search,
+            volume_max=volume_max,
+            volume_min=volume_min,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_markets(
+        self,
+        *,
+        ascending: bool | None = None,
+        closed: bool | None = None,
+        clob_token_ids: str | Sequence[str] | None = None,
+        condition_ids: str | Sequence[str] | None = None,
+        cyom: bool | None = None,
+        decimalized: bool | None = None,
+        end_date_max: TimestampFilter | None = None,
+        end_date_min: TimestampFilter | None = None,
+        game_id: str | None = None,
+        ids: int | Sequence[int] | None = None,
+        include_tag: bool | None = None,
+        liquidity_num_max: float | None = None,
+        liquidity_num_min: float | None = None,
+        locale: str | None = None,
+        market_maker_addresses: str | Sequence[str] | None = None,
+        order: str | None = None,
+        onchain_event_ids: str | Sequence[str] | None = None,
+        position_ids: str | Sequence[str] | None = None,
+        question_ids: str | Sequence[str] | None = None,
+        related_tags: bool | None = None,
+        request_ids: str | Sequence[str] | None = None,
+        resolution_status: MarketResolutionStatus
+        | Literal["inactive", "active", "resolved"]
+        | None = None,
+        rfq_enabled: bool | None = None,
+        rewards_min_size: float | None = None,
+        slug: str | Sequence[str] | None = None,
+        sports_market_types: str | Sequence[str] | None = None,
+        start_date_max: TimestampFilter | None = None,
+        start_date_min: TimestampFilter | None = None,
+        tag_id: int | None = None,
+        tag_match: TagMatch | None = None,
+        uma_resolution_status: str | None = None,
+        version: ProtocolVersion
+        | Literal["v1", "v2"]
+        | Sequence[ProtocolVersion | Literal["v1", "v2"]]
+        | None = None,
+        volume_num_max: float | None = None,
+        volume_num_min: float | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Market]:
+        """List markets.
+
+        Omitting ``version`` uses the current server default of CTF markets (v1).
+        Pass one version or a sequence of one or two versions. Keep the same
+        selection when resuming a cursor.
+
+        V2 markets can be filtered by ``version``, ``resolution_status``,
+        ``request_ids``, and ``onchain_event_ids``. Each ID filter accepts at
+        most 100 values. V1 markets use ``uma_resolution_status`` separately.
+
+        Markets that cannot be represented by the binary Market model are
+        omitted from results.
+
+        ``order`` takes one or more comma-separated market field names, with
+        ``ascending`` setting the direction (for example ``"volume"``,
+        ``"liquidity"``, ``"volume24hr"``, ``"startDate"``, ``"endDate"``,
+        ``"createdAt"``, ``"slug"``). ``"volume"`` and ``"liquidity"`` sort by
+        their numeric values. A cursor obtained from an earlier release with
+        ``order="volume"`` or ``order="liquidity"`` cannot be resumed.
+
+        Returns:
+            A paginator over matching markets.
+
+        Examples:
+            Fetch the first page::
+
+                paginator = client.list_markets(closed=False, page_size=10)
+                first_page = paginator.first_page()
+
+            Iterate over every market item::
+
+                for market in client.list_markets(closed=False).iter_items():
+                    print(market.question)
+        """
+        spec = _gamma_actions.list_markets_spec(
+            ascending=ascending,
+            closed=closed,
+            clob_token_ids=clob_token_ids,
+            condition_ids=condition_ids,
+            cyom=cyom,
+            decimalized=decimalized,
+            end_date_max=end_date_max,
+            end_date_min=end_date_min,
+            game_id=game_id,
+            ids=ids,
+            include_tag=include_tag,
+            liquidity_num_max=liquidity_num_max,
+            liquidity_num_min=liquidity_num_min,
+            locale=locale,
+            market_maker_addresses=market_maker_addresses,
+            order=order,
+            onchain_event_ids=onchain_event_ids,
+            position_ids=position_ids,
+            question_ids=question_ids,
+            related_tags=related_tags,
+            request_ids=request_ids,
+            resolution_status=resolution_status,
+            rfq_enabled=rfq_enabled,
+            rewards_min_size=rewards_min_size,
+            slug=slug,
+            sports_market_types=sports_market_types,
+            start_date_max=start_date_max,
+            start_date_min=start_date_min,
+            tag_id=tag_id,
+            tag_match=tag_match,
+            uma_resolution_status=uma_resolution_status,
+            version=version,
+            volume_num_max=volume_num_max,
+            volume_num_min=volume_num_min,
+        )
+        return scope_market_paginator(sync_paginate_keyset(self._ctx, spec, page_size=page_size))
+
+    def list_combo_markets(
+        self,
+        *,
+        exclude: str | Sequence[str] | None = None,
+        page_size: int = 20,
+    ) -> Paginator[ComboMarket]:
+        """List markets available for Combos.
+
+        Returns:
+            A paginator over matching Combo markets.
+        """
+        spec = _rfq_actions.list_combo_markets_spec(exclude=exclude)
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_series(
+        self,
+        *,
+        ascending: bool | None = None,
+        closed: bool | None = None,
+        exclude_events: bool | None = None,
+        locale: str | None = None,
+        order: str | None = None,
+        recurrence: Recurrence | None = None,
+        slug: str | Sequence[str] | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Series]:
+        """List series.
+
+        Returns:
+            A paginator over matching series.
+        """
+        spec = _gamma_actions.list_series_spec(
+            ascending=ascending,
+            closed=closed,
+            exclude_events=exclude_events,
+            locale=locale,
+            order=order,
+            recurrence=recurrence,
+            slug=slug,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def list_tags(
+        self,
+        *,
+        ascending: bool | None = None,
+        include_template: bool | None = None,
+        is_carousel: bool | None = None,
+        locale: str | None = None,
+        order: str | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Tag]:
+        """List tags.
+
+        Returns:
+            A paginator over matching tags.
+        """
+        spec = _gamma_actions.list_tags_spec(
+            ascending=ascending,
+            include_template=include_template,
+            is_carousel=is_carousel,
+            locale=locale,
+            order=order,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def list_teams(
+        self,
+        *,
+        abbreviation: str | Sequence[str] | None = None,
+        ascending: bool | None = None,
+        league: str | Sequence[str] | None = None,
+        name: str | Sequence[str] | None = None,
+        order: str | None = None,
+        provider_ids: int | Sequence[int] | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Team]:
+        """List teams.
+
+        Returns:
+            A paginator over matching teams.
+        """
+        spec = _gamma_actions.list_teams_spec(
+            abbreviation=abbreviation,
+            ascending=ascending,
+            league=league,
+            name=name,
+            order=order,
+            provider_ids=provider_ids,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def list_comments(
+        self,
+        *,
+        parent_entity_id: str,
+        parent_entity_type: CommentParentEntityType,
+        ascending: bool | None = None,
+        get_positions: bool | None = None,
+        holders_only: bool | None = None,
+        order: str | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Comment]:
+        """List comments for an event or series.
+
+        Without ``order``, pages are newest first and ``ascending`` is ignored.
+        With ``order`` (``id`` or ``createdAt``), pages are ascending unless
+        ``ascending`` is ``False``.
+
+        Reads without ``holders_only`` or ``get_positions`` and with one of
+        those orders page through the whole thread. Their cursors continue that
+        exact query and are rejected for a different parent, order or
+        direction.
+
+        Reads with ``holders_only``, ``get_positions`` or another order serve
+        pages up to offset 200. Automatic iteration yields the final accessible
+        full page with ``limit_reached=True`` and stops normally. Its
+        ``has_more`` stays True: completeness is unknown, not proof that more
+        comments exist. Explicitly following its cursor raises
+        ``PaginationLimitError`` before any request is sent. Cursors saved from
+        earlier versions keep working with the same arguments.
+
+        ``page_size`` counts top-level comments; replies ride along in the same
+        page. A thread ending exactly on a page boundary may return one final
+        empty page.
+
+        Returns:
+            A paginator over matching comments.
+        """
+        spec = _gamma_actions.list_comments_spec(
+            parent_entity_id=parent_entity_id,
+            parent_entity_type=parent_entity_type,
+            ascending=ascending,
+            get_positions=get_positions,
+            holders_only=holders_only,
+            order=order,
+        )
+        if not _gamma_actions.comments_paginate_by_cursor(
+            get_positions=get_positions, holders_only=holders_only, order=order
+        ):
+            return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+        return sync_paginate_keyset_or_resume_offset(
+            self._ctx,
+            keyset_spec=_gamma_actions.list_comments_keyset_spec(
+                parent_entity_id=parent_entity_id,
+                parent_entity_type=parent_entity_type,
+                ascending=ascending,
+                order=order,
+            ),
+            offset_spec=spec,
+            page_size=page_size,
+        )
+
+    def list_comments_by_user_address(
+        self,
+        *,
+        address: str,
+        ascending: bool | None = None,
+        order: str | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Comment]:
+        """List comments authored by a user address.
+
+        Pages starting past offset 200 are not served. Automatic iteration
+        yields the final accessible full page with ``limit_reached=True`` and
+        stops normally. Its ``has_more`` stays True: completeness is unknown,
+        not proof that more comments exist. Explicitly following its cursor
+        raises ``PaginationLimitError`` before any request is sent.
+
+        This is a hard stop for this listing: there are no range filters to
+        retrieve the remaining comments.
+
+        Returns:
+            A paginator over matching comments.
+        """
+        spec = _gamma_actions.list_comments_by_user_address_spec(
+            address=address,
+            ascending=ascending,
+            order=order,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def search(
+        self,
+        *,
+        q: str,
+        ascending: bool | None = None,
+        cache: bool | None = None,
+        events_status: str | None = None,
+        events_tag: str | Sequence[str] | None = None,
+        exclude_tag_ids: int | Sequence[int] | None = None,
+        keep_closed_markets: int | None = None,
+        optimized: bool | None = None,
+        presets: str | Sequence[str] | None = None,
+        recurrence: Recurrence | None = None,
+        search_profiles: bool | None = None,
+        search_tags: bool | None = None,
+        sort: SearchSort | None = None,
+        page_size: int = 10,
+    ) -> Paginator[SearchResults]:
+        """Search SDK content.
+
+        Args:
+            keep_closed_markets: Include markets closed within this many hours when
+                searching active events.
+            sort: Event sort field. Supported values are ``volume``, ``volume_24hr``,
+                ``liquidity``, ``competitive``, ``closed_time``, ``start_date``, and
+                ``end_date``.
+
+        Returns:
+            A paginator over search result pages.
+
+        Examples:
+            Search markets and events::
+
+                for result in client.search(q="election").iter_items():
+                    print(result)
+        """
+        spec = _gamma_actions.search_spec(
+            q=q,
+            ascending=ascending,
+            cache=cache,
+            events_status=events_status,
+            events_tag=events_tag,
+            exclude_tag_ids=exclude_tag_ids,
+            keep_closed_markets=keep_closed_markets,
+            optimized=optimized,
+            presets=presets,
+            recurrence=recurrence,
+            search_profiles=search_profiles,
+            search_tags=search_tags,
+            sort=sort,
+        )
+        return sync_paginate_page_based(self._ctx, spec, page_size=page_size)
+
+    def get_midpoint(self, *, asset_id: str | None = None, token_id: str | None = None) -> Decimal:
+        """Get the midpoint price for a CLOB asset."""
+        path, params = _clob_actions.build_midpoint_request(asset_id=asset_id, token_id=token_id)
+        return _clob_actions.parse_midpoint(self._ctx.clob.get_json(path, params=params))
+
+    def get_midpoints(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> dict[ClobAssetId, Decimal]:
+        """Get midpoint prices for multiple CLOB assets."""
+        path, body = _clob_actions.build_midpoints_request(asset_ids=asset_ids, token_ids=token_ids)
+        return _clob_actions.parse_midpoints(self._ctx.clob.post_json(path, json=body))
+
+    def get_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: OrderSide,
+    ) -> Decimal:
+        """Get the executable price for a CLOB asset side."""
+        path, params = _clob_actions.build_price_request(
+            asset_id=asset_id, token_id=token_id, side=side
+        )
+        return _clob_actions.parse_price(self._ctx.clob.get_json(path, params=params))
+
+    def get_prices(
+        self, *, requests: Sequence[PriceRequest]
+    ) -> dict[ClobAssetId, dict[OrderSide, Decimal]]:
+        """Get executable prices for multiple CLOB asset-side requests."""
+        path, body = _clob_actions.build_prices_request(requests=requests)
+        return _clob_actions.parse_prices(self._ctx.clob.post_json(path, json=body))
+
+    def get_order_book(
+        self, *, asset_id: str | None = None, token_id: str | None = None
+    ) -> OrderBook:
+        """Get the order book for a CLOB asset."""
+        path, params = _clob_actions.build_order_book_request(asset_id=asset_id, token_id=token_id)
+        return _clob_actions.parse_order_book(self._ctx.clob.get_json(path, params=params))
+
+    def get_order_books(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> tuple[OrderBook, ...]:
+        """Get order books for multiple CLOB assets."""
+        path, body = _clob_actions.build_order_books_request(
+            asset_ids=asset_ids, token_ids=token_ids
+        )
+        return _clob_actions.parse_order_books(self._ctx.clob.post_json(path, json=body))
+
+    def get_spread(self, *, asset_id: str | None = None, token_id: str | None = None) -> Decimal:
+        """Get the bid-ask spread for a CLOB asset."""
+        path, params = _clob_actions.build_spread_request(asset_id=asset_id, token_id=token_id)
+        return _clob_actions.parse_spread(self._ctx.clob.get_json(path, params=params))
+
+    def get_spreads(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> dict[ClobAssetId, Decimal]:
+        """Get bid-ask spreads for multiple CLOB assets."""
+        path, body = _clob_actions.build_spreads_request(asset_ids=asset_ids, token_ids=token_ids)
+        return _clob_actions.parse_spreads(self._ctx.clob.post_json(path, json=body))
+
+    def get_last_trade_price(
+        self, *, asset_id: str | None = None, token_id: str | None = None
+    ) -> LastTradePrice | None:
+        """Get the most recent trade price for a CLOB asset.
+
+        Returns ``None`` when the CLOB asset has not traded.
+        """
+        path, params = _clob_actions.build_last_trade_price_request(
+            asset_id=asset_id, token_id=token_id
+        )
+        return _clob_actions.parse_last_trade_price(self._ctx.clob.get_json(path, params=params))
+
+    def get_last_trade_prices(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> tuple[LastTradePriceForAsset, ...]:
+        """Get the most recent trade prices for multiple CLOB assets.
+
+        Assets without trades are omitted. Match returned entries by ``asset_id``;
+        the result is not positionally aligned with ``asset_ids``.
+        """
+        path, body = _clob_actions.build_last_trade_prices_request(
+            asset_ids=asset_ids, token_ids=token_ids
+        )
+        return _clob_actions.parse_last_trade_prices(self._ctx.clob.post_json(path, json=body))
+
+    @overload
+    def estimate_market_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["BUY"],
+        amount: Decimal | int | float | str,
+        order_type: MarketOrderType = "FOK",
+    ) -> Decimal: ...
+    @overload
+    def estimate_market_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["SELL"],
+        shares: Decimal | int | float | str,
+        order_type: MarketOrderType = "FOK",
+    ) -> Decimal: ...
+    def estimate_market_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: OrderSide,
+        amount: Decimal | int | float | str | None = None,
+        shares: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FOK",
+    ) -> Decimal:
+        """Estimate the limiting price level for a market order.
+
+        BUY orders use ``amount`` as the spend amount. SELL orders use ``shares``
+        as the number of shares to sell.
+
+        Raises:
+            UserInputError: If the side-specific amount is missing or invalid.
+            InsufficientLiquidityError: If available liquidity cannot fill the order.
+        """
+        return _estimate_market_price_sync(
+            self._ctx,
+            asset_id=asset_id,
+            token_id=token_id,
+            side=side,
+            amount=amount,
+            shares=shares,
+            order_type=order_type,
+        )
+
+    def get_current_rebates(self, *, date: str, maker_address: str) -> tuple[RebatedFee, ...]:
+        """Get maker fee rebates for a YYYY-MM-DD calendar day without authentication.
+
+        Amounts retain exact precision as Decimal values in USDC units.
+        Returns an empty tuple when the maker has no rebates for the date.
+        """
+        path, params = _rewards_actions.build_get_current_rebates_request(
+            date=date, maker_address=maker_address
+        )
+        return _rewards_actions.parse_current_rebates(self._ctx.clob.get_json(path, params=params))
+
+    def list_current_rewards(self, *, sponsored: bool | None = None) -> Paginator[CurrentReward]:
+        """List current rewards.
+
+        Returns:
+            A paginator over current reward configurations.
+        """
+
+        def fetch(cursor: str | None) -> Page[CurrentReward]:
+            path, params = _rewards_actions.build_list_current_rewards_request(
+                sponsored=sponsored, cursor=cursor
+            )
+            return _rewards_actions.parse_current_rewards_page(
+                self._ctx.clob.get_json(path, params=params)
+            )
+
+        return Paginator(fetch=fetch)
+
+    def list_market_rewards(
+        self, *, condition_id: str, sponsored: bool | None = None
+    ) -> Paginator[MarketReward]:
+        """List rewards for a market condition.
+
+        Returns:
+            A paginator over matching market reward configurations.
+        """
+
+        def fetch(cursor: str | None) -> Page[MarketReward]:
+            path, params = _rewards_actions.build_list_market_rewards_request(
+                condition_id=CtfConditionId(condition_id), sponsored=sponsored, cursor=cursor
+            )
+            return _rewards_actions.parse_market_rewards_page(
+                self._ctx.clob.get_json(path, params=params)
+            )
+
+        return Paginator(fetch=fetch)

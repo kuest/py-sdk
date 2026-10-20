@@ -1,0 +1,3529 @@
+"""Synchronous secure SDK client."""
+
+import logging
+import time
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from decimal import Decimal
+from types import TracebackType
+from typing import TYPE_CHECKING, Literal, Self, cast, overload
+
+from eth_account import Account
+from eth_account.signers.local import LocalAccount
+from eth_utils.address import to_checksum_address
+
+from market_sdk._internal.actions import account as _account_actions
+from market_sdk._internal.actions import auth as _auth_actions
+from market_sdk._internal.actions import clob as _clob_actions
+from market_sdk._internal.actions import combo_rfq as _combo_rfq_actions
+from market_sdk._internal.actions import combos as _combos_actions
+from market_sdk._internal.actions import data as _data_actions
+from market_sdk._internal.actions import gamma as _gamma_actions
+from market_sdk._internal.actions import order_heartbeats as _order_heartbeat_actions
+from market_sdk._internal.actions import rewards as _rewards_actions
+from market_sdk._internal.actions import rfq as _rfq_actions
+from market_sdk._internal.actions import session_keys as _session_key_actions
+from market_sdk._internal.actions.gamma import (
+    CommentParentEntityType,
+    DateFilter,
+    Recurrence,
+    SearchSort,
+    TagMatch,
+    TimestampFilter,
+)
+from market_sdk._internal.actions.orders import cancel as _cancel_actions
+from market_sdk._internal.actions.orders import post as _post_actions
+from market_sdk._internal.actions.orders import settlement as _settlement_actions
+from market_sdk._internal.actions.orders.cache import SyncOrderMetadataCache
+from market_sdk._internal.actions.orders.estimate import (
+    estimate_market_price_sync as _estimate_market_price_sync,
+)
+from market_sdk._internal.actions.orders.limit import (
+    prepare_limit_order_draft_sync,
+    validate_limit_order_params,
+)
+from market_sdk._internal.actions.orders.market import (
+    prepare_market_order_draft_sync,
+    validate_market_order_params,
+)
+from market_sdk._internal.actions.orders.orders import (
+    create_signed_order,
+    create_unsigned_order,
+)
+from market_sdk._internal.actions.orders.place import (
+    post_order_with_allowance_recovery_sync,
+)
+from market_sdk._internal.actions.orders.settlement import DEFAULT_SETTLEMENT_TIMEOUT_S
+from market_sdk._internal.actions.orders.typed_data import (
+    build_order_signature,
+    build_order_typed_data,
+)
+from market_sdk._internal.actions.orders.types import OrderDraft
+from market_sdk._internal.actions.relayer.approvals import (
+    build_get_trading_approvals_state_spec,
+    build_missing_trading_approval_calls,
+    get_trading_approvals_state_sync,
+)
+from market_sdk._internal.actions.relayer.auth import (
+    build_builder_key_headers,
+    make_relayer_header_resolver_sync,
+)
+from market_sdk._internal.actions.relayer.calls import (
+    MAX_UINT256,
+    TransactionCall,
+    combinatorial_prepare_condition_call,
+    ctf_redeem_positions_call,
+    decode_erc1155_balance_of_batch_result,
+    decode_erc1155_balance_of_result,
+    erc20_approval_call,
+    erc20_transfer_call,
+    erc1155_balance_of_batch_call,
+    erc1155_balance_of_call,
+    erc1155_set_approval_for_all_call,
+    merge_positions_call,
+    merge_v2_call,
+    neg_risk_redeem_positions_call,
+    redeem_v2_call,
+    split_position_call,
+    split_v2_call,
+)
+from market_sdk._internal.actions.relayer.deployed import fetch_deployed_sync
+from market_sdk._internal.actions.relayer.gasless import (
+    prepare_gasless_transaction_sync,
+    submit_deposit_wallet_create_sync,
+)
+from market_sdk._internal.actions.relayer.positions import (
+    MarketPositionContext,
+    canonicalize_combo_legs,
+    decode_combo_outcome_position_id,
+    derive_combo_outcome_position_ids,
+    derive_combo_position_context,
+    normalize_batch_merge_position_request,
+    normalize_market_position_context,
+    parse_market_id,
+    resolve_merge_amount_from_balances,
+)
+from market_sdk._internal.context import SyncSecureClientContext
+from market_sdk._internal.dispatch import (
+    sync_dispatch,
+    sync_paginate_keyset,
+    sync_paginate_keyset_or_resume_offset,
+    sync_paginate_offset,
+    sync_paginate_page_based,
+)
+from market_sdk._internal.environment import EnvironmentConfig, get_environment_config
+from market_sdk._internal.eoa.broadcast import broadcast_eoa_call_sync
+from market_sdk._internal.eoa.rpc import SyncJsonRpcClient
+from market_sdk._internal.hmac import build_hmac_signature
+from market_sdk._internal.l1_auth import sign_api_key_auth
+from market_sdk._internal.wallet import (
+    SignerType,
+    WalletType,
+    classify_account,
+    derive_beacon_deposit_wallet_address,
+    derive_uups_deposit_wallet_address,
+    signature_type_for,
+    wrap_deposit_wallet_signature,
+)
+from market_sdk.auth import ApiKey, BuilderApiKey, RelayerApiKey
+from market_sdk.clients._transport import SyncHeaderResolver, SyncTransport
+from market_sdk.environments import PRODUCTION, Environment
+from market_sdk.errors import (
+    RequestRejectedError,
+    SigningError,
+    UnexpectedResponseError,
+    UserInputError,
+)
+from market_sdk.models import (
+    ApiKeyCreds,
+    AssetType,
+    BalanceAllowance,
+    BuilderFeeRates,
+    ClobTrade,
+    ComboMarket,
+    Comment,
+    Event,
+    LastTradePrice,
+    LastTradePriceForAsset,
+    Market,
+    MarketResolutionStatus,
+    Notification,
+    OpenOrder,
+    OrderBook,
+    OrderSide,
+    PriceRequest,
+    ProtocolVersion,
+    PublicProfile,
+    RelatedTag,
+    SearchResults,
+    Series,
+    SportsMarketTypes,
+    SportsMetadata,
+    Tag,
+    TagReference,
+    Team,
+    TradingApprovalsState,
+)
+from market_sdk.models.clob import BuilderApiKeyInfo, BuilderTrade
+from market_sdk.models.clob.cancel import CancelOrdersResponse
+from market_sdk.models.clob.order_heartbeats import OrderHeartbeat
+from market_sdk.models.clob.order_response import AcceptedOrder, OrderResponse
+from market_sdk.models.clob.orders import MarketOrderType, SignedOrder
+from market_sdk.models.clob.relayer import RelayerTransactionType
+from market_sdk.models.clob.rewards import (
+    CurrentReward,
+    MarketReward,
+    RebatedFee,
+    RewardsPercentages,
+    TotalUserEarning,
+    UserEarning,
+    UserRewardsEarning,
+)
+from market_sdk.models.collateral_return import CollateralReturnPlanResponse
+from market_sdk.models.data import (
+    Activity,
+    ActivityTypeFilter,
+    BuilderStanding,
+    BuilderVolumeInterval,
+    BuilderVolumePoint,
+    ComboActivity,
+    ComboBiggestWinner,
+    ComboPosition,
+    ComboPositionSortBy,
+    ComboPositionStatusFilter,
+    LeaderboardWindow,
+    LiveVolume,
+    MarketBiggestWinner,
+    MetaHolder,
+    OpenInterest,
+    PortfolioValue,
+    Position,
+    PositionFilterType,
+    PositionSortBy,
+    PositionStatusFilter,
+    PriceHistoryInterval,
+    PriceHistoryPoint,
+    Resolution,
+    SortDirection,
+    TokenReference,
+    Trade,
+    TradeFilterType,
+    TraderLeaderboardEntry,
+    TraderLeaderboardSort,
+    TraderLeaderboardStanding,
+    UserPnlFidelityInput,
+    UserPnlIntervalInput,
+    UserPnlSeries,
+    UserStats,
+    UserVolume,
+)
+from market_sdk.models.types import ClobAssetId, CtfConditionId
+from market_sdk.pagination import Page, Paginator
+from market_sdk.rate_limit import RateLimitUpdateListener
+from market_sdk.rfq import (
+    ComboFillResult,
+    ComboQuote,
+    ComboQuoteAcceptance,
+    ComboQuoteResult,
+    RfqDirection,
+    RfqSide,
+    RfqStatusResult,
+)
+from market_sdk.session_keys import (
+    AuthorizedSessionKey,
+    AuthorizeSessionKeyResult,
+    SessionKeyKnownScope,
+    SessionKeyScope,
+)
+from market_sdk.site_config import (
+    SITE_CONFIG,
+    GeoblockStatus,
+    ensure_geoblock_allowed,
+    fetch_geoblock_status,
+    get_site_order_context,
+)
+from market_sdk.site_scope import scope_market_paginator
+from market_sdk.transactions import (
+    MergePositionRequest,
+    SyncDeprecatedTransactionHandle,
+    SyncEoaTransactionHandle,
+    SyncGaslessTransactionHandle,
+    SyncTransactionHandle,
+)
+from market_sdk.types import EvmAddress, HexString, TransactionHash
+
+if TYPE_CHECKING:
+    from market_sdk.clients.public import PublicClient
+
+_CREATE_TOKEN = object()
+
+
+def _validate_nonce(nonce: object) -> None:
+    if isinstance(nonce, bool) or not isinstance(nonce, int):
+        raise UserInputError("nonce must be a non-negative integer.")
+    if nonce < 0:
+        raise UserInputError("nonce must be a non-negative integer.")
+
+
+class SecureClient:
+    """Synchronous client for authenticated account, trading, and wallet workflows.
+
+    Create instances with :meth:`SecureClient.create` so the SDK can derive or
+    validate credentials before authenticated requests are made.
+    """
+
+    def list_trades(
+        self,
+        *,
+        user: str | None = None,
+        condition_id: str | Sequence[str] | None = None,
+        event_id: int | Sequence[int] | None = None,
+        side: OrderSide | None = None,
+        taker_only: bool | None = None,
+        filter_type: TradeFilterType | None = None,
+        filter_amount: float | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+        page_size: int = 100,
+    ) -> Paginator[Trade]:
+        """List trades. Size is shares and price is USDC per share.
+
+        Time filters apply when a user is supplied. ``full_history`` selects all history.
+
+        Omit ``user`` to use the authenticated wallet.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_trades_spec(
+            user=self._user_or_wallet(user),
+            condition_id=condition_id,
+            event_id=event_id,
+            side=side,
+            taker_only=taker_only,
+            filter_type=filter_type,
+            filter_amount=filter_amount,
+            start=start,
+            end=end,
+            full_history=full_history,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_activity(
+        self,
+        *,
+        user: str | None = None,
+        condition_id: str | Sequence[str] | None = None,
+        event_id: int | Sequence[int] | None = None,
+        activity_types: Sequence[ActivityTypeFilter] | None = None,
+        side: OrderSide | None = None,
+        sort_direction: SortDirection | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+        page_size: int = 100,
+    ) -> Paginator[Activity]:
+        """List wallet activity, including deposits and withdrawals.
+
+        Amounts are USDC and shares are outcome units.
+
+        Omit ``user`` to use the authenticated wallet.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_activity_spec(
+            user=self._user_or_wallet(user),
+            condition_id=condition_id,
+            event_id=event_id,
+            activity_types=activity_types,
+            side=side,
+            sort_direction=sort_direction,
+            start=start,
+            end=end,
+            full_history=full_history,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_combo_activity(
+        self,
+        *,
+        user: str | None = None,
+        condition_id: str | Sequence[str] | None = None,
+        page_size: int = 100,
+    ) -> Paginator[ComboActivity]:
+        """List combo lifecycle activity. Amounts and payouts are USDC.
+
+        Omit ``user`` to use the authenticated wallet.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_combo_activity_spec(
+            user=self._user_or_wallet(user), condition_id=condition_id
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_positions(
+        self,
+        *,
+        user: str | None = None,
+        condition_id: str | Sequence[str] | None = None,
+        status: PositionStatusFilter | None = None,
+        event_id: int | Sequence[int] | None = None,
+        title: str | None = None,
+        filter_type: PositionFilterType | None = None,
+        filter_amount: float | None = None,
+        include_archived: bool | None = None,
+        sort_by: PositionSortBy | None = None,
+        sort_direction: SortDirection | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+        page_size: int = 100,
+    ) -> Paginator[Position]:
+        """List positions for a wallet or a single market.
+
+        Use ``status="CLOSED"`` for closed positions. Sizes are shares and values are USDC.
+
+        ``status="REDEEMABLE_LOST"`` lists the wallet's still-held positions that resolved
+        to a zero payout. ``status="MERGEABLE"`` lists its live complementary pairs. Both
+        are filters only: a lost position still reports ``REDEEMABLE`` and a mergeable
+        one ``OPEN``. ``sort_by`` defaults to ``TOKENS`` for ``MERGEABLE``,
+        ``REALIZED_PNL`` for ``CLOSED``, and ``CURRENT_VALUE`` for every other status.
+
+        For wallet-anchored ``CLOSED`` listings, ``TOKENS``, ``CURRENT_VALUE``, ``PRICE``
+        and ``UNREALIZED_PNL`` sort by realized PnL in the requested direction. Keep
+        the original filters and requested sort when resuming a cursor. If an older
+        cursor is rejected with HTTP 400 because the ordering changed, discard it
+        and explicitly fetch a new first page; the paginator does not restart.
+
+        ``title`` filters by case-insensitive substring (max 200 Unicode characters).
+        ``%`` and ``_`` remain wildcards. Blank input is ignored; other patterns are
+        preserved unchanged on every page, including cursor replay.
+
+        Positions have no time bounds by default. ``full_history=True`` also includes
+        holdings without activity and cannot be combined with ``start`` or ``end``.
+
+        Omit ``user`` to use the authenticated wallet.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_positions_spec(
+            user=self._user_or_wallet(user),
+            condition_id=condition_id,
+            status=status,
+            event_id=event_id,
+            title=title,
+            filter_type=filter_type,
+            filter_amount=filter_amount,
+            include_archived=include_archived,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            start=start,
+            end=end,
+            full_history=full_history,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_combo_positions(
+        self,
+        *,
+        user: str | None = None,
+        condition_id: str | Sequence[str] | None = None,
+        status: ComboPositionStatusFilter | Sequence[ComboPositionStatusFilter] | None = None,
+        sort_by: ComboPositionSortBy | None = None,
+        sort_direction: SortDirection | None = None,
+        updated_after: int | datetime | None = None,
+        updated_before: int | datetime | None = None,
+        page_size: int = 100,
+    ) -> Paginator[ComboPosition]:
+        """List combo positions, optionally filtering by multiple statuses.
+
+        Update bounds are inclusive. Sizes are shares; costs and payouts are USDC.
+
+        Zero is a valid update bound. Without a status filter, supplying either bound
+        selects the synchronization view, which also includes positions no longer held.
+
+        Omit ``user`` to use the authenticated wallet.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_combo_positions_spec(
+            user=self._user_or_wallet(user),
+            condition_id=condition_id,
+            status=status,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            updated_after=updated_after,
+            updated_before=updated_before,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_portfolio_value(
+        self,
+        *,
+        user: str | None = None,
+        condition_ids: str | Sequence[str] | None = None,
+    ) -> PortfolioValue:
+        """Get current portfolio value in USDC.
+
+        Omit ``user`` to use the authenticated wallet."""
+        spec = _data_actions.build_get_portfolio_value_spec(
+            user=self._user_or_wallet(user), condition_ids=condition_ids
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def get_user_stats(
+        self,
+        *,
+        user: str | None = None,
+    ) -> UserStats | None:
+        """Get wallet statistics, or ``None`` when the wallet has no statistics.
+
+        Omit ``user`` to use the authenticated wallet."""
+        spec = _data_actions.build_get_user_stats_spec(user=self._user_or_wallet(user))
+        return sync_dispatch(self._ctx, spec)
+
+    def get_user_pnl(
+        self,
+        *,
+        user: str | None = None,
+        interval: UserPnlIntervalInput | None = None,
+        fidelity: UserPnlFidelityInput | None = None,
+    ) -> UserPnlSeries:
+        """Get cumulative wallet PnL in USDC and volume in shares.
+
+        Omit ``user`` to use the authenticated wallet."""
+        spec = _data_actions.build_get_user_pnl_spec(
+            user=self._user_or_wallet(user), interval=interval, fidelity=fidelity
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def get_user_volume(
+        self,
+        *,
+        user: str | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        full_history: bool = False,
+    ) -> UserVolume:
+        """Get trading volume in shares and USDC. Time bounds are floored to UTC days.
+
+        Omit ``user`` to use the authenticated wallet."""
+        spec = _data_actions.build_get_user_volume_spec(
+            user=self._user_or_wallet(user), start=start, end=end, full_history=full_history
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def list_market_holders(
+        self,
+        *,
+        condition_ids: str | Sequence[str],
+        min_balance: float | None = None,
+        include_pnl: bool | None = None,
+        page_size: int = 100,
+    ) -> Paginator[MetaHolder]:
+        """List holders grouped by outcome asset. Amounts are shares; PnL is USDC.
+
+        Page size applies per outcome. Merge groups across pages by ``asset_id``.
+        With ``include_pnl=True``, the maximum page size is 100; amounts are gross per side.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.build_list_market_holders_spec(
+            condition_ids=condition_ids, min_balance=min_balance, include_pnl=include_pnl
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_open_interests(
+        self,
+        *,
+        condition_ids: str | Sequence[str] | None = None,
+    ) -> tuple[OpenInterest, ...]:
+        """Get open interest in USDC. Omit conditions to request global interest."""
+        spec = _data_actions.get_open_interests_spec(condition_ids=condition_ids)
+        return sync_dispatch(self._ctx, spec)
+
+    def get_event_live_volume(
+        self,
+        *,
+        event_ids: int | Sequence[int],
+    ) -> LiveVolume:
+        """Get combined event taker volume in shares with a market breakdown."""
+        spec = _data_actions.build_get_event_live_volume_spec(event_ids=event_ids)
+        return sync_dispatch(self._ctx, spec)
+
+    def list_price_history(
+        self,
+        *,
+        asset_id: str,
+        interval: PriceHistoryInterval | None = None,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+        as_of: int | datetime | None = None,
+        bucket_seconds: int | None = None,
+        page_size: int | None = None,
+    ) -> Paginator[PriceHistoryPoint]:
+        """List historical prices in USDC per share, oldest first.
+
+        Select an interval, a start/end window (end exclusive), or an exact ``as_of``.
+        Windows span at most 15 days. ``as_of`` forbids bucket_seconds and page_size.
+        The default page size is 10000.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.build_list_price_history_spec(
+            asset_id=asset_id,
+            interval=interval,
+            start=start,
+            end=end,
+            as_of=as_of,
+            bucket_seconds=bucket_seconds,
+            page_size=page_size,
+        )
+        return sync_paginate_keyset(
+            self._ctx, spec, page_size=10000 if page_size is None else page_size
+        )
+
+    def get_token_references(
+        self,
+        *,
+        asset_ids: str | Sequence[str] | None = None,
+        condition_ids: str | Sequence[str] | None = None,
+    ) -> tuple[TokenReference, ...]:
+        """Get outcome asset reference and settlement metadata as a direct tuple.
+
+        Provide exactly one selector family: up to 50 distinct decimal asset IDs,
+        or up to 10 distinct 31-byte or 32-byte hex condition selectors. A scalar
+        string denotes one ID. Elements are trimmed, blanks dropped, and duplicates
+        removed in first-seen order. Decimal IDs have leading zeros stripped and
+        at most 78 remaining digits. Conditions are lowercased without padding.
+
+        Unknown selectors contribute no rows. Asset lookups retain request order;
+        condition groups retain server order and can repeat assets when selectors
+        overlap. Nullable metadata is explicit. Outcome labels and settlement
+        metadata may lag by up to a minute. Transient rate limits are retried.
+        """
+        spec = _data_actions.build_get_token_references_spec(
+            asset_ids=asset_ids, condition_ids=condition_ids
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def get_resolutions(
+        self,
+        *,
+        question_id: str | None = None,
+        condition_ids: str | Sequence[str] | None = None,
+        event_ids: int | Sequence[int] | None = None,
+    ) -> tuple[Resolution, ...]:
+        """Get resolutions by question, conditions, or events. Missing rows are omitted."""
+        spec = _data_actions.build_get_resolutions_spec(
+            question_id=question_id, condition_ids=condition_ids, event_ids=event_ids
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def list_trader_leaderboard(
+        self,
+        *,
+        category: str | None = None,
+        window: LeaderboardWindow | None = None,
+        sort_by: TraderLeaderboardSort | None = None,
+        page_size: int = 100,
+    ) -> Paginator[TraderLeaderboardEntry]:
+        """List ranked traders. PnL is USDC and volume is shares; ranks can tie and skip.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_trader_leaderboard_spec(
+            category=category, window=window, sort_by=sort_by
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_trader_leaderboard_standing(
+        self,
+        *,
+        user: str | None = None,
+        category: str | None = None,
+        window: LeaderboardWindow | None = None,
+    ) -> TraderLeaderboardStanding | None:
+        """Get wallet leaderboard standings, or ``None`` when unavailable.
+
+        PnL is USDC and volume is shares. Unranked ranks are ``None``.
+
+        Omit ``user`` to use the authenticated wallet."""
+        spec = _data_actions.build_get_trader_leaderboard_standing_spec(
+            user=self._user_or_wallet(user), category=category, window=window
+        )
+        return sync_dispatch(self._ctx, spec)
+
+    def list_biggest_winners(
+        self,
+        *,
+        category: str | None = None,
+        window: LeaderboardWindow | None = None,
+        page_size: int = 100,
+    ) -> Paginator[MarketBiggestWinner | ComboBiggestWinner]:
+        """List winning market and combo positions, ordered by USDC PnL.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.build_list_biggest_winners_spec(category=category, window=window)
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_builder_leaderboard(
+        self,
+        *,
+        window: LeaderboardWindow | None = None,
+        page_size: int = 100,
+    ) -> Paginator[BuilderStanding]:
+        """List ranked builders and their trading volume in shares.
+
+        Resuming a cursor uses the page size stored by that cursor."""
+        spec = _data_actions.list_builder_leaderboard_spec(window=window)
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def get_builder_volumes(
+        self,
+        *,
+        interval: BuilderVolumeInterval | None = None,
+        bucket_limit: int | None = None,
+    ) -> tuple[BuilderVolumePoint, ...]:
+        """Get builder volume in shares by calendar bucket.
+
+        ``bucket_limit`` counts dates, not rows (default 30, maximum 90).
+        Interval ``all`` yields calendar-year buckets."""
+        spec = _data_actions.get_builder_volumes_spec(interval=interval, bucket_limit=bucket_limit)
+        return sync_dispatch(self._ctx, spec)
+
+    def __init__(
+        self,
+        *,
+        ctx: SyncSecureClientContext,
+        _create_token: object | None = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        if _create_token is not _CREATE_TOKEN:
+            raise RuntimeError("Use SecureClient.create(...) to create a secure client")
+        self._ended = False
+        self._geoblock_status: GeoblockStatus | None = None
+        self._ctx_inner = ctx
+
+    @property
+    def _ctx(self) -> SyncSecureClientContext:
+        if self._ended:
+            raise RuntimeError(
+                "SecureClient has ended authentication; use the returned PublicClient "
+                "or create a new SecureClient."
+            )
+        return self._ctx_inner
+
+    @_ctx.setter
+    def _ctx(self, value: SyncSecureClientContext) -> None:
+        self._ctx_inner = value
+
+    def _ensure_geoblock_allowed(self) -> None:
+        if not SITE_CONFIG["geoblock"]:
+            return
+        if self._geoblock_status is None:
+            self._geoblock_status = fetch_geoblock_status()
+        ensure_geoblock_allowed(self._geoblock_status)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        private_key: str,
+        wallet: str | None = None,
+        environment: Environment = PRODUCTION,
+        credentials: ApiKeyCreds | None = None,
+        api_key: ApiKey | None = None,
+        nonce: int = 0,
+        logger: logging.Logger | None = None,
+        on_rate_limit_update: RateLimitUpdateListener | None = None,
+    ) -> Self:
+        """Create an authenticated synchronous client.
+
+        Args:
+            private_key: EVM private key used for signing.
+            wallet: Wallet address to act for. Defaults to the signer's Deposit Wallet.
+            credentials: Existing API credentials. When omitted, credentials are
+                derived during client creation.
+            api_key: Optional key for gasless wallet and relayed transaction workflows.
+            nonce: Credential derivation nonce. Cannot be combined with ``credentials``.
+            on_rate_limit_update: Listener invoked whenever a response reports
+                per-signer rate-limit state, as order and cancellation responses
+                do. Errors raised by the listener are ignored.
+
+        Raises:
+            UserInputError: If key material, wallet, nonce, or credentials are invalid.
+            RequestRejectedError: If credential derivation or validation is rejected.
+        """
+        client = cls._create(
+            private_key=private_key,
+            wallet=wallet,
+            environment=environment,
+            credentials=credentials,
+            api_key=api_key,
+            nonce=nonce,
+            validate_credentials=True,
+            logger=logger,
+            on_rate_limit_update=on_rate_limit_update,
+        )
+        try:
+            return client._ensure_wallet_ready()
+        except BaseException:
+            client.close()
+            raise
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        private_key: str,
+        wallet: str | None = None,
+        environment: Environment = PRODUCTION,
+        credentials: ApiKeyCreds | None = None,
+        api_key: ApiKey | None = None,
+        nonce: int = 0,
+        validate_credentials: bool = True,
+        logger: logging.Logger | None = None,
+        on_rate_limit_update: RateLimitUpdateListener | None = None,
+    ) -> Self:
+        if not private_key:
+            raise UserInputError("private_key is required")
+        _validate_nonce(nonce)
+        if credentials is not None and nonce != 0:
+            raise UserInputError("nonce cannot be combined with credentials.")
+        config = get_environment_config(environment)
+        try:
+            signer = cast(LocalAccount, Account.from_key(private_key))
+        except (ValueError, TypeError) as error:
+            raise UserInputError(f"Invalid private_key: {error}") from error
+
+        resolved_wallet = _resolve_requested_wallet_sync(
+            signer=signer,
+            wallet=wallet,
+            config=config,
+            logger=logger,
+        )
+        account = classify_account(
+            signer=signer.address,
+            wallet=resolved_wallet,
+            config=config.wallet_derivation,
+        )
+
+        bootstrap_clob = SyncTransport(base_url=config.clob_url, logger=logger)
+        try:
+            resolved_credentials = _bootstrap_credentials_sync(
+                config=config,
+                signer=signer,
+                clob=bootstrap_clob,
+                provided=credentials,
+                nonce=nonce,
+                validate=validate_credentials,
+                logger=logger,
+            )
+        finally:
+            bootstrap_clob.close()
+
+        return cls._construct_for_wallet(
+            signer=signer,
+            wallet=resolved_wallet,
+            wallet_type=account.wallet_type,
+            signer_type=account.signer_type,
+            environment=environment,
+            config=config,
+            credentials=resolved_credentials,
+            api_key=api_key,
+            logger=logger,
+            on_rate_limit_update=on_rate_limit_update,
+        )
+
+    @classmethod
+    def _construct_for_wallet(
+        cls,
+        *,
+        signer: LocalAccount,
+        wallet: str,
+        wallet_type: WalletType,
+        signer_type: SignerType,
+        environment: Environment,
+        config: EnvironmentConfig,
+        credentials: ApiKeyCreds,
+        api_key: ApiKey | None,
+        logger: logging.Logger | None,
+        on_rate_limit_update: RateLimitUpdateListener | None,
+    ) -> Self:
+        try:
+            wallet_checksum = to_checksum_address(wallet)
+        except ValueError as error:
+            raise UserInputError(f"Invalid wallet address: {error}") from error
+        branded_wallet = cast(EvmAddress, wallet_checksum)
+
+        gamma = SyncTransport(base_url=config.gamma_url, logger=logger)
+        data = SyncTransport(base_url=config.data_url, logger=logger)
+        rfq = SyncTransport(base_url=config.rfq_url, logger=logger)
+        clob = SyncTransport(
+            base_url=config.clob_url,
+            logger=logger,
+            on_rate_limit_update=on_rate_limit_update,
+        )
+        relayer_resolver = (
+            make_relayer_header_resolver_sync(api_key) if api_key is not None else None
+        )
+        relayer = SyncTransport(
+            base_url=config.relayer_url,
+            logger=logger,
+            header_resolver=relayer_resolver,
+        )
+        combos = SyncTransport(
+            base_url=config.collateral_return_url,
+            logger=logger,
+            header_resolver=relayer_resolver,
+        )
+        builder_gateway = SyncTransport(
+            base_url=config.builder_gateway_url,
+            logger=logger,
+            header_resolver=_make_builder_gateway_header_resolver_sync(
+                api_key, signer, credentials
+            ),
+        )
+        try:
+            secure_clob = SyncTransport(
+                base_url=config.clob_url,
+                logger=logger,
+                header_resolver=_make_l2_header_resolver_sync(signer, credentials),
+                on_rate_limit_update=on_rate_limit_update,
+            )
+            rpc_transport = SyncTransport(base_url=config.rpc_url, logger=logger)
+            rpc = SyncJsonRpcClient(rpc_transport)
+        except BaseException:
+            gamma.close()
+            data.close()
+            rfq.close()
+            clob.close()
+            relayer.close()
+            combos.close()
+            builder_gateway.close()
+            raise
+
+        ctx = SyncSecureClientContext(
+            environment=environment,
+            _resolved_environment_config=config,
+            gamma=gamma,
+            data=data,
+            rfq=rfq,
+            clob=clob,
+            signer=signer,
+            credentials=credentials,
+            secure_clob=secure_clob,
+            wallet=branded_wallet,
+            wallet_type=wallet_type,
+            signer_type=signer_type,
+            relayer=relayer,
+            combos=combos,
+            builder_gateway=builder_gateway,
+            api_key=api_key,
+            rpc=rpc,
+            order_metadata=SyncOrderMetadataCache(),
+        )
+        return cls(ctx=ctx, _create_token=_CREATE_TOKEN, logger=logger)
+
+    @property
+    def environment(self) -> Environment:
+        """Environment this client sends requests to."""
+        return self._ctx.environment
+
+    @property
+    def wallet(self) -> EvmAddress:
+        """Wallet address authenticated by this client."""
+        return self._ctx.wallet
+
+    @property
+    def signer(self) -> EvmAddress:
+        """Signer address used for signatures."""
+        return cast(EvmAddress, self._ctx.signer.address)
+
+    @property
+    def wallet_type(self) -> WalletType:
+        """Detected wallet type for the authenticated wallet."""
+        return self._ctx.wallet_type
+
+    @property
+    def credentials(self) -> ApiKeyCreds:
+        """API credentials used for authenticated requests."""
+        return self._ctx.credentials
+
+    def authorize_session_key(
+        self,
+        *,
+        address: str,
+        scopes: Sequence[SessionKeyScope] = (SessionKeyKnownScope.ALL,),
+        idempotency_key: str | None = None,
+    ) -> AuthorizeSessionKeyResult:
+        """Authorize an externally managed signer for selected venues.
+
+        The SDK receives only the public address. The application remains
+        responsible for generating, storing, and protecting the private key.
+        Requires a :class:`BuilderApiKey` passed as ``api_key=`` when
+        constructing the client.
+        Scope names are normalized to uppercase. Unknown names remain usable
+        before this SDK enumerates them. When scopes are omitted,
+        authorization defaults to ``ALL``.
+        Authorizations expire 180 days after they are created.
+
+        Resolves after the submitted transaction is confirmed and the session
+        key appears in the active session-key list.
+
+        Raises:
+            UserInputError: If the client or authorization input is invalid.
+            RequestRejectedError: If the authorization request is rejected.
+            RateLimitError: If the authorization or transaction request is rate-limited.
+            SigningError: If the owner signature cannot be produced.
+            TransportError: If a network request fails.
+            UnexpectedResponseError: If an authorization or transaction response is malformed.
+            TimeoutError: If transaction confirmation exceeds the wait budget.
+            TransactionFailedError: If the authorization transaction fails.
+        """
+        return _session_key_actions.authorize_session_key_sync(
+            self._ctx,
+            address=address,
+            scopes=scopes,
+            idempotency_key=idempotency_key,
+        )
+
+    def fetch_session_keys(self) -> tuple[AuthorizedSessionKey, ...]:
+        """Fetch active session keys authorized for the Deposit Wallet.
+
+        Raises:
+            UserInputError: If this client is not the Deposit Wallet owner.
+            RequestRejectedError: If the request is rejected.
+            RateLimitError: If the request is rate-limited.
+            SigningError: If request authentication cannot be produced.
+            TransportError: If the network request fails.
+            UnexpectedResponseError: If the response is malformed.
+        """
+        return _session_key_actions.fetch_session_keys_sync(self._ctx)
+
+    def revoke_session_key(
+        self,
+        *,
+        address: str,
+        idempotency_key: str | None = None,
+    ) -> None:
+        """Revoke a session key authorized for the Deposit Wallet.
+
+        Returns once the key is absent from the active-key registry and unusable.
+        Requires an ``api_key=`` that supports gasless transactions.
+
+        Raises:
+            UserInputError: If the client or revocation input is invalid.
+            RequestRejectedError: If the revocation request is rejected.
+            RateLimitError: If a revocation or registry request remains rate-limited.
+            SigningError: If the owner signature cannot be produced.
+            TransportError: If a network request fails.
+            TransactionFailedError: If the revocation transaction fails.
+            UnexpectedResponseError: If a revocation or registry response is malformed.
+            TimeoutError: If registry removal exceeds the wait budget.
+        """
+        return _session_key_actions.revoke_session_key_sync(
+            self._ctx,
+            address=address,
+            idempotency_key=idempotency_key,
+        )
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the underlying network transports."""
+        ctx = self._ctx_inner
+        try:
+            ctx.gamma.close()
+        finally:
+            try:
+                ctx.data.close()
+            finally:
+                try:
+                    ctx.clob.close()
+                finally:
+                    try:
+                        ctx.rfq.close()
+                    finally:
+                        try:
+                            ctx.secure_clob.close()
+                        finally:
+                            try:
+                                ctx.relayer.close()
+                            finally:
+                                try:
+                                    ctx.combos.close()
+                                finally:
+                                    try:
+                                        ctx.builder_gateway.close()
+                                    finally:
+                                        ctx.rpc.close()
+
+    def _user_or_wallet(self, user: str | None) -> str:
+        return self._ctx.wallet if user is None else user
+
+    @overload
+    def get_market(
+        self, *, id: str, include_tag: bool | None = None, locale: str | None = None
+    ) -> Market: ...
+    @overload
+    def get_market(
+        self, *, slug: str, include_tag: bool | None = None, locale: str | None = None
+    ) -> Market: ...
+    @overload
+    def get_market(
+        self, *, url: str, include_tag: bool | None = None, locale: str | None = None
+    ) -> Market: ...
+    def get_market(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        url: str | None = None,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+    ) -> Market:
+        """Get a market by id, slug, or SDK URL.
+
+        Markets that cannot be represented by the binary Market model raise
+        UnexpectedResponseError.
+        """
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_market_spec(
+                id=id, slug=slug, url=url, include_tag=include_tag, locale=locale
+            ),
+        )
+
+    def get_market_tags(self, id: str) -> tuple[TagReference, ...]:
+        """Get a market's tags."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_market_tags_spec(id))
+
+    @overload
+    def get_event(
+        self,
+        *,
+        id: str,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event: ...
+    @overload
+    def get_event(
+        self,
+        *,
+        slug: str,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event: ...
+    @overload
+    def get_event(
+        self,
+        *,
+        url: str,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event: ...
+    def get_event(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        url: str | None = None,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Event:
+        """Get an event by id, slug, or SDK URL."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_event_spec(
+                id=id,
+                slug=slug,
+                url=url,
+                include_best_lines=include_best_lines,
+                include_chat=include_chat,
+                include_template=include_template,
+                locale=locale,
+            ),
+        )
+
+    def get_event_tags(self, id: str) -> tuple[TagReference, ...]:
+        """Get an event's tags."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_event_tags_spec(id))
+
+    def get_series(
+        self,
+        id: str,
+        *,
+        locale: str | None = None,
+    ) -> Series:
+        """Get a series."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_series_spec(id, locale=locale),
+        )
+
+    @overload
+    def get_tag(
+        self, *, id: str, include_template: bool | None = None, locale: str | None = None
+    ) -> Tag: ...
+    @overload
+    def get_tag(self, *, slug: str, locale: str | None = None) -> Tag: ...
+    def get_tag(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        include_template: bool | None = None,
+        locale: str | None = None,
+    ) -> Tag:
+        """Get a tag by id or slug."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_tag_spec(
+                id=id,
+                slug=slug,
+                include_template=include_template,
+                locale=locale,
+            ),
+        )
+
+    def get_related_tags(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        omit_empty: bool | None = None,
+        status: str | None = None,
+    ) -> tuple[RelatedTag, ...]:
+        """Get related tag relationships."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_related_tags_spec(
+                id=id, slug=slug, omit_empty=omit_empty, status=status
+            ),
+        )
+
+    def get_related_tag_resources(
+        self,
+        *,
+        id: str | None = None,
+        slug: str | None = None,
+        locale: str | None = None,
+        omit_empty: bool | None = None,
+        status: str | None = None,
+    ) -> tuple[Tag, ...]:
+        """Get tag resources linked from related tag relationships."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_related_tag_resources_spec(
+                id=id, slug=slug, locale=locale, omit_empty=omit_empty, status=status
+            ),
+        )
+
+    def get_sports(self) -> tuple[SportsMetadata, ...]:
+        """Get available sports metadata."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_sports_spec())
+
+    def get_sports_market_types(self) -> SportsMarketTypes:
+        """Get available sports market types."""
+        return sync_dispatch(self._ctx, _gamma_actions.get_sports_market_types_spec())
+
+    def get_public_profile(self, address: str) -> PublicProfile | None:
+        """Get a public profile by wallet address. Returns None if no profile exists."""
+        try:
+            return sync_dispatch(self._ctx, _gamma_actions.get_public_profile_spec(address))
+        except RequestRejectedError as error:
+            if error.status == 404:
+                return None
+            raise
+
+    def get_comment_thread(
+        self, id: str, *, get_positions: bool | None = None
+    ) -> tuple[Comment, ...]:
+        """Get a comment thread by comment ID."""
+        return sync_dispatch(
+            self._ctx,
+            _gamma_actions.get_comment_thread_spec(id, get_positions=get_positions),
+        )
+
+    def list_builder_trades(
+        self,
+        *,
+        builder_code: str,
+        market: str | None = None,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        id: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> Paginator[BuilderTrade]:
+        """Unavailable until the CLOB filters ``/builder/trades`` by builder code."""
+
+        raise UserInputError(
+            "Builder trade filtering is unavailable: the CLOB /builder/trades route "
+            "ignores builder_code."
+        )
+
+    def download_accounting_snapshot(self, *, user: str | None = None) -> bytes:
+        """Download the accounting snapshot archive for a user or the authenticated wallet."""
+        path, params = _data_actions.build_accounting_snapshot_request(
+            user=self._user_or_wallet(user)
+        )
+        return self._ctx.data.get_bytes(path, params=params)
+
+    def list_events(
+        self,
+        *,
+        ascending: bool | None = None,
+        closed: bool = False,
+        cyom: bool | None = None,
+        end_date_max: TimestampFilter | None = None,
+        end_date_min: TimestampFilter | None = None,
+        ended: bool | None = None,
+        event_date: DateFilter | None = None,
+        event_week: int | None = None,
+        exclude_tag_ids: int | Sequence[int] | None = None,
+        featured: bool | None = None,
+        featured_order: bool | None = None,
+        game_ids: int | Sequence[int] | None = None,
+        ids: int | Sequence[int] | None = None,
+        include_best_lines: bool | None = None,
+        include_chat: bool | None = None,
+        include_children: bool | None = None,
+        include_template: bool | None = None,
+        liquidity_max: float | None = None,
+        liquidity_min: float | None = None,
+        live: bool | None = None,
+        locale: str | None = None,
+        order: str | None = None,
+        parent_event_id: int | None = None,
+        partner_slug: str | None = None,
+        recurrence: Recurrence | None = None,
+        related_tags: bool | None = None,
+        series_ids: int | Sequence[int] | None = None,
+        slug: str | Sequence[str] | None = None,
+        start_date_max: TimestampFilter | None = None,
+        start_date_min: TimestampFilter | None = None,
+        start_time_max: TimestampFilter | None = None,
+        start_time_min: TimestampFilter | None = None,
+        tag_ids: int | Sequence[int] | None = None,
+        tag_match: TagMatch | None = None,
+        tag_slug: str | None = None,
+        title_search: str | None = None,
+        volume_max: float | None = None,
+        volume_min: float | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Event]:
+        """List events.
+
+        Defaults to open events. Pass ``closed=True`` to list settled events.
+
+        Returns:
+            A paginator over matching events.
+        """
+        spec = _gamma_actions.list_events_spec(
+            ascending=ascending,
+            closed=closed,
+            cyom=cyom,
+            end_date_max=end_date_max,
+            end_date_min=end_date_min,
+            ended=ended,
+            event_date=event_date,
+            event_week=event_week,
+            exclude_tag_ids=exclude_tag_ids,
+            featured=featured,
+            featured_order=featured_order,
+            game_ids=game_ids,
+            ids=ids,
+            include_best_lines=include_best_lines,
+            include_chat=include_chat,
+            include_children=include_children,
+            include_template=include_template,
+            liquidity_max=liquidity_max,
+            liquidity_min=liquidity_min,
+            live=live,
+            locale=locale,
+            order=order,
+            parent_event_id=parent_event_id,
+            partner_slug=partner_slug,
+            recurrence=recurrence,
+            related_tags=related_tags,
+            series_ids=series_ids,
+            slug=slug,
+            start_date_max=start_date_max,
+            start_date_min=start_date_min,
+            start_time_max=start_time_max,
+            start_time_min=start_time_min,
+            tag_ids=tag_ids,
+            tag_match=tag_match,
+            tag_slug=tag_slug,
+            title_search=title_search,
+            volume_max=volume_max,
+            volume_min=volume_min,
+        )
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_markets(
+        self,
+        *,
+        ascending: bool | None = None,
+        closed: bool | None = None,
+        clob_token_ids: str | Sequence[str] | None = None,
+        condition_ids: str | Sequence[str] | None = None,
+        cyom: bool | None = None,
+        decimalized: bool | None = None,
+        end_date_max: TimestampFilter | None = None,
+        end_date_min: TimestampFilter | None = None,
+        game_id: str | None = None,
+        ids: int | Sequence[int] | None = None,
+        include_tag: bool | None = None,
+        liquidity_num_max: float | None = None,
+        liquidity_num_min: float | None = None,
+        locale: str | None = None,
+        market_maker_addresses: str | Sequence[str] | None = None,
+        order: str | None = None,
+        onchain_event_ids: str | Sequence[str] | None = None,
+        position_ids: str | Sequence[str] | None = None,
+        question_ids: str | Sequence[str] | None = None,
+        related_tags: bool | None = None,
+        request_ids: str | Sequence[str] | None = None,
+        resolution_status: MarketResolutionStatus
+        | Literal["inactive", "active", "resolved"]
+        | None = None,
+        rfq_enabled: bool | None = None,
+        rewards_min_size: float | None = None,
+        slug: str | Sequence[str] | None = None,
+        sports_market_types: str | Sequence[str] | None = None,
+        start_date_max: TimestampFilter | None = None,
+        start_date_min: TimestampFilter | None = None,
+        tag_id: int | None = None,
+        tag_match: TagMatch | None = None,
+        uma_resolution_status: str | None = None,
+        version: ProtocolVersion
+        | Literal["v1", "v2"]
+        | Sequence[ProtocolVersion | Literal["v1", "v2"]]
+        | None = None,
+        volume_num_max: float | None = None,
+        volume_num_min: float | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Market]:
+        """List markets.
+
+        Omitting ``version`` uses the current server default of CTF markets (v1).
+        Pass one version or a sequence of one or two versions. Keep the same
+        selection when resuming a cursor.
+
+        V2 markets can be filtered by ``version``, ``resolution_status``,
+        ``request_ids``, and ``onchain_event_ids``. Each ID filter accepts at
+        most 100 values. V1 markets use ``uma_resolution_status`` separately.
+
+        Markets that cannot be represented by the binary Market model are
+        omitted from results.
+
+        Returns:
+            A paginator over matching markets.
+        """
+        spec = _gamma_actions.list_markets_spec(
+            ascending=ascending,
+            closed=closed,
+            clob_token_ids=clob_token_ids,
+            condition_ids=condition_ids,
+            cyom=cyom,
+            decimalized=decimalized,
+            end_date_max=end_date_max,
+            end_date_min=end_date_min,
+            game_id=game_id,
+            ids=ids,
+            include_tag=include_tag,
+            liquidity_num_max=liquidity_num_max,
+            liquidity_num_min=liquidity_num_min,
+            locale=locale,
+            market_maker_addresses=market_maker_addresses,
+            order=order,
+            onchain_event_ids=onchain_event_ids,
+            position_ids=position_ids,
+            question_ids=question_ids,
+            related_tags=related_tags,
+            request_ids=request_ids,
+            resolution_status=resolution_status,
+            rfq_enabled=rfq_enabled,
+            rewards_min_size=rewards_min_size,
+            slug=slug,
+            sports_market_types=sports_market_types,
+            start_date_max=start_date_max,
+            start_date_min=start_date_min,
+            tag_id=tag_id,
+            tag_match=tag_match,
+            uma_resolution_status=uma_resolution_status,
+            version=version,
+            volume_num_max=volume_num_max,
+            volume_num_min=volume_num_min,
+        )
+        return scope_market_paginator(sync_paginate_keyset(self._ctx, spec, page_size=page_size))
+
+    def list_combo_markets(
+        self,
+        *,
+        exclude: str | Sequence[str] | None = None,
+        page_size: int = 20,
+    ) -> Paginator[ComboMarket]:
+        """List markets available for Combos.
+
+        Returns:
+            A paginator over matching Combo markets.
+        """
+        spec = _rfq_actions.list_combo_markets_spec(exclude=exclude)
+        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_series(
+        self,
+        *,
+        ascending: bool | None = None,
+        closed: bool | None = None,
+        exclude_events: bool | None = None,
+        locale: str | None = None,
+        order: str | None = None,
+        recurrence: Recurrence | None = None,
+        slug: str | Sequence[str] | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Series]:
+        """List series.
+
+        Returns:
+            A paginator over matching series.
+        """
+        spec = _gamma_actions.list_series_spec(
+            ascending=ascending,
+            closed=closed,
+            exclude_events=exclude_events,
+            locale=locale,
+            order=order,
+            recurrence=recurrence,
+            slug=slug,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def list_tags(
+        self,
+        *,
+        ascending: bool | None = None,
+        include_template: bool | None = None,
+        is_carousel: bool | None = None,
+        locale: str | None = None,
+        order: str | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Tag]:
+        """List tags.
+
+        Returns:
+            A paginator over matching tags.
+        """
+        spec = _gamma_actions.list_tags_spec(
+            ascending=ascending,
+            include_template=include_template,
+            is_carousel=is_carousel,
+            locale=locale,
+            order=order,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def list_teams(
+        self,
+        *,
+        abbreviation: str | Sequence[str] | None = None,
+        ascending: bool | None = None,
+        league: str | Sequence[str] | None = None,
+        name: str | Sequence[str] | None = None,
+        order: str | None = None,
+        provider_ids: int | Sequence[int] | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Team]:
+        """List teams.
+
+        Returns:
+            A paginator over matching teams.
+        """
+        spec = _gamma_actions.list_teams_spec(
+            abbreviation=abbreviation,
+            ascending=ascending,
+            league=league,
+            name=name,
+            order=order,
+            provider_ids=provider_ids,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def list_comments(
+        self,
+        *,
+        parent_entity_id: str,
+        parent_entity_type: CommentParentEntityType,
+        ascending: bool | None = None,
+        get_positions: bool | None = None,
+        holders_only: bool | None = None,
+        order: str | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Comment]:
+        """List comments for an event or series.
+
+        Without ``order``, pages are newest first and ``ascending`` is ignored.
+        With ``order`` (``id`` or ``createdAt``), pages are ascending unless
+        ``ascending`` is ``False``.
+
+        Reads without ``holders_only`` or ``get_positions`` and with one of
+        those orders page through the whole thread. Their cursors continue that
+        exact query and are rejected for a different parent, order or
+        direction.
+
+        Reads with ``holders_only``, ``get_positions`` or another order serve
+        pages up to offset 200. Automatic iteration yields the final accessible
+        full page with ``limit_reached=True`` and stops normally. Its
+        ``has_more`` stays True: completeness is unknown, not proof that more
+        comments exist. Explicitly following its cursor raises
+        ``PaginationLimitError`` before any request is sent. Cursors saved from
+        earlier versions keep working with the same arguments.
+
+        ``page_size`` counts top-level comments; replies ride along in the same
+        page. A thread ending exactly on a page boundary may return one final
+        empty page.
+
+        Returns:
+            A paginator over matching comments.
+        """
+        spec = _gamma_actions.list_comments_spec(
+            parent_entity_id=parent_entity_id,
+            parent_entity_type=parent_entity_type,
+            ascending=ascending,
+            get_positions=get_positions,
+            holders_only=holders_only,
+            order=order,
+        )
+        if not _gamma_actions.comments_paginate_by_cursor(
+            get_positions=get_positions, holders_only=holders_only, order=order
+        ):
+            return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+        return sync_paginate_keyset_or_resume_offset(
+            self._ctx,
+            keyset_spec=_gamma_actions.list_comments_keyset_spec(
+                parent_entity_id=parent_entity_id,
+                parent_entity_type=parent_entity_type,
+                ascending=ascending,
+                order=order,
+            ),
+            offset_spec=spec,
+            page_size=page_size,
+        )
+
+    def list_comments_by_user_address(
+        self,
+        *,
+        address: str,
+        ascending: bool | None = None,
+        order: str | None = None,
+        page_size: int = 20,
+    ) -> Paginator[Comment]:
+        """List comments authored by a user address.
+
+        Pages starting past offset 200 are not served. Automatic iteration
+        yields the final accessible full page with ``limit_reached=True`` and
+        stops normally. Its ``has_more`` stays True: completeness is unknown,
+        not proof that more comments exist. Explicitly following its cursor
+        raises ``PaginationLimitError`` before any request is sent.
+
+        This is a hard stop for this listing: there are no range filters to
+        retrieve the remaining comments.
+
+        Returns:
+            A paginator over matching comments.
+        """
+        spec = _gamma_actions.list_comments_by_user_address_spec(
+            address=address,
+            ascending=ascending,
+            order=order,
+        )
+        return sync_paginate_offset(self._ctx, spec, page_size=page_size)
+
+    def search(
+        self,
+        *,
+        q: str,
+        ascending: bool | None = None,
+        cache: bool | None = None,
+        events_status: str | None = None,
+        events_tag: str | Sequence[str] | None = None,
+        exclude_tag_ids: int | Sequence[int] | None = None,
+        keep_closed_markets: int | None = None,
+        optimized: bool | None = None,
+        presets: str | Sequence[str] | None = None,
+        recurrence: Recurrence | None = None,
+        search_profiles: bool | None = None,
+        search_tags: bool | None = None,
+        sort: SearchSort | None = None,
+        page_size: int = 10,
+    ) -> Paginator[SearchResults]:
+        """Search SDK content.
+
+        Args:
+            keep_closed_markets: Include markets closed within this many hours when
+                searching active events.
+            sort: Event sort field. Supported values are ``volume``, ``volume_24hr``,
+                ``liquidity``, ``competitive``, ``closed_time``, ``start_date``, and
+                ``end_date``.
+
+        Returns:
+            A paginator over search result pages.
+        """
+        spec = _gamma_actions.search_spec(
+            q=q,
+            ascending=ascending,
+            cache=cache,
+            events_status=events_status,
+            events_tag=events_tag,
+            exclude_tag_ids=exclude_tag_ids,
+            keep_closed_markets=keep_closed_markets,
+            optimized=optimized,
+            presets=presets,
+            recurrence=recurrence,
+            search_profiles=search_profiles,
+            search_tags=search_tags,
+            sort=sort,
+        )
+        return sync_paginate_page_based(self._ctx, spec, page_size=page_size)
+
+    def get_midpoint(self, *, asset_id: str | None = None, token_id: str | None = None) -> Decimal:
+        """Get the midpoint price for a CLOB asset."""
+        path, params = _clob_actions.build_midpoint_request(asset_id=asset_id, token_id=token_id)
+        return _clob_actions.parse_midpoint(self._ctx.clob.get_json(path, params=params))
+
+    def get_midpoints(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> dict[ClobAssetId, Decimal]:
+        """Get midpoint prices for multiple CLOB assets."""
+        path, body = _clob_actions.build_midpoints_request(asset_ids=asset_ids, token_ids=token_ids)
+        return _clob_actions.parse_midpoints(self._ctx.clob.post_json(path, json=body))
+
+    def get_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: OrderSide,
+    ) -> Decimal:
+        """Get the executable price for a CLOB asset side."""
+        path, params = _clob_actions.build_price_request(
+            asset_id=asset_id, token_id=token_id, side=side
+        )
+        return _clob_actions.parse_price(self._ctx.clob.get_json(path, params=params))
+
+    def get_prices(
+        self, *, requests: Sequence[PriceRequest]
+    ) -> dict[ClobAssetId, dict[OrderSide, Decimal]]:
+        """Get executable prices for multiple CLOB asset-side requests."""
+        path, body = _clob_actions.build_prices_request(requests=requests)
+        return _clob_actions.parse_prices(self._ctx.clob.post_json(path, json=body))
+
+    def get_order_book(
+        self, *, asset_id: str | None = None, token_id: str | None = None
+    ) -> OrderBook:
+        """Get the order book for a CLOB asset."""
+        path, params = _clob_actions.build_order_book_request(asset_id=asset_id, token_id=token_id)
+        return _clob_actions.parse_order_book(self._ctx.clob.get_json(path, params=params))
+
+    def get_order_books(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> tuple[OrderBook, ...]:
+        """Get order books for multiple CLOB assets."""
+        path, body = _clob_actions.build_order_books_request(
+            asset_ids=asset_ids, token_ids=token_ids
+        )
+        return _clob_actions.parse_order_books(self._ctx.clob.post_json(path, json=body))
+
+    def get_spread(self, *, asset_id: str | None = None, token_id: str | None = None) -> Decimal:
+        """Get the bid-ask spread for a CLOB asset."""
+        path, params = _clob_actions.build_spread_request(asset_id=asset_id, token_id=token_id)
+        return _clob_actions.parse_spread(self._ctx.clob.get_json(path, params=params))
+
+    def get_spreads(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> dict[ClobAssetId, Decimal]:
+        """Get bid-ask spreads for multiple CLOB assets."""
+        path, body = _clob_actions.build_spreads_request(asset_ids=asset_ids, token_ids=token_ids)
+        return _clob_actions.parse_spreads(self._ctx.clob.post_json(path, json=body))
+
+    def get_last_trade_price(
+        self, *, asset_id: str | None = None, token_id: str | None = None
+    ) -> LastTradePrice | None:
+        """Get the most recent trade price for a CLOB asset.
+
+        Returns ``None`` when the CLOB asset has not traded.
+        """
+        path, params = _clob_actions.build_last_trade_price_request(
+            asset_id=asset_id, token_id=token_id
+        )
+        return _clob_actions.parse_last_trade_price(self._ctx.clob.get_json(path, params=params))
+
+    def get_last_trade_prices(
+        self,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        token_ids: Sequence[str] | None = None,
+    ) -> tuple[LastTradePriceForAsset, ...]:
+        """Get the most recent trade prices for multiple CLOB assets.
+
+        Assets without trades are omitted. Match returned entries by ``asset_id``;
+        the result is not positionally aligned with ``asset_ids``.
+        """
+        path, body = _clob_actions.build_last_trade_prices_request(
+            asset_ids=asset_ids, token_ids=token_ids
+        )
+        return _clob_actions.parse_last_trade_prices(self._ctx.clob.post_json(path, json=body))
+
+    @overload
+    def estimate_market_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["BUY"],
+        amount: Decimal | int | float | str,
+        order_type: MarketOrderType = "FOK",
+    ) -> Decimal: ...
+    @overload
+    def estimate_market_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["SELL"],
+        shares: Decimal | int | float | str,
+        order_type: MarketOrderType = "FOK",
+    ) -> Decimal: ...
+    def estimate_market_price(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: OrderSide,
+        amount: Decimal | int | float | str | None = None,
+        shares: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FOK",
+    ) -> Decimal:
+        """Estimate the limiting price level for a market order.
+
+        BUY orders use ``amount`` as the spend amount. SELL orders use ``shares``
+        as the number of shares to sell.
+        """
+        return _estimate_market_price_sync(
+            self._ctx,
+            asset_id=asset_id,
+            token_id=token_id,
+            side=side,
+            amount=amount,
+            shares=shares,
+            order_type=order_type,
+        )
+
+    def get_current_rebates(self, *, date: str, maker_address: str) -> tuple[RebatedFee, ...]:
+        """Get maker fee rebates for a YYYY-MM-DD calendar day without authentication.
+
+        Amounts retain exact precision as Decimal values in USDC units.
+        Returns an empty tuple when the maker has no rebates for the date.
+        """
+        path, params = _rewards_actions.build_get_current_rebates_request(
+            date=date, maker_address=maker_address
+        )
+        return _rewards_actions.parse_current_rebates(self._ctx.clob.get_json(path, params=params))
+
+    def send_order_heartbeat(self, *, heartbeat_id: str = "") -> OrderHeartbeat:
+        """Send one authenticated order heartbeat and retain the returned ID.
+
+        The first accepted send enables timeout cancellation for ALL open orders
+        owned by this API key, across markets and processes. Only start when you
+        can keep sending every five seconds. After ten seconds without an accepted
+        send, the server attempts cancel-all; timing and success are not guaranteed.
+        Start with an empty ID, serialize sends per key, and retain every returned
+        ID. No timer or automatic retry starts. A lost response may follow an
+        accepted send, so failure does not prove registration is inactive.
+
+        There is no disarm operation. Stopping sends or closing the client leaves
+        the deadline active. On shutdown, stop placing orders and explicitly
+        cancel/verify orders you intend to remove. Expiry removes the registration;
+        later accepted sends register again. Separate from WebSocket keepalive.
+
+        Raises:
+            UserInputError: heartbeat_id is not a string.
+            OrderHeartbeatMismatchError: Retry explicitly with the error's
+                heartbeat_id. Rejected sends do not refresh the deadline.
+            RequestRejectedError: Authentication or another request rejection.
+            RateLimitError: The request was rate limited.
+            TransportError: The request failed; acceptance may be unknown.
+            UnexpectedResponseError: The response could not be parsed.
+        """
+        path, body = _order_heartbeat_actions.build_send_order_heartbeat_request(
+            heartbeat_id=heartbeat_id
+        )
+        return _order_heartbeat_actions.parse_order_heartbeat(
+            self._ctx.secure_clob.post_json(path, json=body)
+        )
+
+    def list_current_rewards(self, *, sponsored: bool | None = None) -> Paginator[CurrentReward]:
+        """List current rewards.
+
+        Returns:
+            A paginator over current reward configurations.
+        """
+
+        def fetch(cursor: str | None) -> Page[CurrentReward]:
+            path, params = _rewards_actions.build_list_current_rewards_request(
+                sponsored=sponsored, cursor=cursor
+            )
+            return _rewards_actions.parse_current_rewards_page(
+                self._ctx.clob.get_json(path, params=params)
+            )
+
+        return Paginator(fetch=fetch)
+
+    def list_market_rewards(
+        self, *, condition_id: str, sponsored: bool | None = None
+    ) -> Paginator[MarketReward]:
+        """List rewards for a market condition.
+
+        Returns:
+            A paginator over matching market reward configurations.
+        """
+
+        def fetch(cursor: str | None) -> Page[MarketReward]:
+            path, params = _rewards_actions.build_list_market_rewards_request(
+                condition_id=CtfConditionId(condition_id), sponsored=sponsored, cursor=cursor
+            )
+            return _rewards_actions.parse_market_rewards_page(
+                self._ctx.clob.get_json(path, params=params)
+            )
+
+        return Paginator(fetch=fetch)
+
+    def fetch_api_keys(self) -> tuple[str, ...]:
+        """Fetch API key identifiers for the authenticated account."""
+        return _auth_actions.fetch_api_keys_sync(self._ctx.secure_clob)
+
+    def delete_api_key(self) -> None:
+        """Delete the API key currently used by this client."""
+        _auth_actions.delete_api_key_sync(self._ctx.secure_clob)
+
+    def create_builder_api_key(self) -> BuilderApiKey:
+        """Create a new builder API key for the authenticated account."""
+        signature = sign_api_key_auth(
+            self._ctx.signer,
+            chain_id=self._ctx.environment_config.chain_id,
+            timestamp=int(time.time()),
+        )
+        return _auth_actions.create_builder_api_key_sync(self._ctx.relayer, signature)
+
+    def fetch_builder_api_keys(self) -> tuple[BuilderApiKeyInfo, ...]:
+        """List the builder API keys for the authenticated account."""
+        if isinstance(self._ctx.api_key, RelayerApiKey):
+            raise UserInputError(
+                "Listing builder keys requires builder credentials or account L2 credentials "
+                "without a relayer API key."
+            )
+        headers = (
+            None
+            if self._ctx.api_key is not None
+            else dict(
+                _make_l2_header_resolver_sync(self._ctx.signer, self._ctx.credentials)(
+                    "GET", "/auth/builder-api-key", None
+                )
+            )
+        )
+        return _auth_actions.fetch_builder_api_keys_sync(self._ctx.relayer, headers=headers)
+
+    def revoke_builder_api_key(self) -> None:
+        """Revoke the builder API key this client is configured with.
+
+        The revocation is authenticated by the builder key itself, so the client must have been
+        created with the key to revoke (``SecureClient.create(api_key=BuilderApiKey(...))``).
+        """
+        builder_key = self._ctx.api_key
+        if not isinstance(builder_key, BuilderApiKey):
+            raise UserInputError(
+                "revoke_builder_api_key requires a client created with the builder key to "
+                "revoke (pass api_key=BuilderApiKey(...) to SecureClient.create)."
+            )
+        _auth_actions.revoke_builder_api_key_sync(self._ctx.relayer, builder_key)
+
+    def end_authentication(self) -> "PublicClient":
+        """Delete current credentials, close this client, and return a public client."""
+        from market_sdk.clients.public import PublicClient
+
+        environment = self._ctx.environment
+        try:
+            self.delete_api_key()
+        except RequestRejectedError as error:
+            if error.status not in (401, 404):
+                raise
+        finally:
+            self.close()
+            self._ended = True
+        return PublicClient(environment=environment)
+
+    def get_closed_only_mode(self) -> bool:
+        """Return whether the authenticated account is in closed-only mode."""
+        path, params = _account_actions.build_closed_only_mode_request()
+        return _account_actions.parse_closed_only_mode(
+            self._ctx.secure_clob.get_json(path, params=params)
+        )
+
+    def list_open_orders(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        id: str | None = None,
+        market: str | None = None,
+    ) -> Paginator[OpenOrder]:
+        """List open orders for the authenticated account.
+
+        Returns:
+            A paginator over matching open orders.
+        """
+
+        def fetch(cursor: str | None) -> Page[OpenOrder]:
+            path, params = _account_actions.build_list_open_orders_request(
+                asset_id=asset_id, token_id=token_id, id=id, market=market, cursor=cursor
+            )
+            payload = self._ctx.secure_clob.get_json(path, params=params)
+            return _account_actions.parse_open_orders_page(payload)
+
+        return Paginator(fetch=fetch)
+
+    def get_order(self, *, order_id: str) -> OpenOrder:
+        """Get one open order for the authenticated account."""
+        path, params = _account_actions.build_get_order_request(order_id=order_id)
+        return _account_actions.parse_open_order(
+            self._ctx.secure_clob.get_json(path, params=params)
+        )
+
+    def list_account_trades(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        id: str | None = None,
+        market: str | None = None,
+        maker_address: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> Paginator[ClobTrade]:
+        """List trades for the authenticated account.
+
+        Returns:
+            A paginator over matching trades.
+        """
+
+        def fetch(cursor: str | None) -> Page[ClobTrade]:
+            path, params = _account_actions.build_list_account_trades_request(
+                asset_id=asset_id,
+                token_id=token_id,
+                id=id,
+                market=market,
+                maker_address=maker_address,
+                after=after,
+                before=before,
+                cursor=cursor,
+            )
+            payload = self._ctx.secure_clob.get_json(path, params=params)
+            return _account_actions.parse_account_trades_page(payload)
+
+        return Paginator(fetch=fetch)
+
+    def get_notifications(self) -> tuple[Notification, ...]:
+        """Get notifications for the authenticated account."""
+        path, params = _account_actions.build_notifications_request(
+            signature_type=signature_type_for(self._ctx.wallet_type)
+        )
+        return _account_actions.parse_notifications(
+            self._ctx.secure_clob.get_json(path, params=params)
+        )
+
+    def drop_notifications(self, *, ids: Sequence[int | str]) -> None:
+        """Delete notifications for the authenticated account."""
+        path, params = _account_actions.build_drop_notifications_request(
+            ids=ids, signature_type=signature_type_for(self._ctx.wallet_type)
+        )
+        self._ctx.secure_clob.delete(path, params=params)
+
+    def get_balance_allowance(
+        self,
+        *,
+        asset_type: AssetType,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+    ) -> BalanceAllowance:
+        """Get balance and allowance information for an asset.
+
+        Use ``COLLATERAL`` for collateral, ``CONDITIONAL`` for a CTF token ID,
+        or ``CONDITIONAL-V2`` for a Polymarket V2 position ID.
+        """
+        path, params = _account_actions.build_balance_allowance_request(
+            asset_type=asset_type,
+            asset_id=asset_id,
+            token_id=token_id,
+            signature_type=signature_type_for(self._ctx.wallet_type),
+        )
+        return _account_actions.parse_balance_allowance(
+            self._ctx.secure_clob.get_json(path, params=params)
+        )
+
+    def create_limit_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        price: Decimal | int | float | str,
+        size: Decimal | int | float | str,
+        side: OrderSide,
+        post_only: bool = False,
+        expiration: int | None = None,
+        builder_code: str | None = None,
+    ) -> SignedOrder:
+        """Create and sign a limit order without posting it.
+
+        Use :meth:`post_order` to submit the returned signed order, or
+        :meth:`place_limit_order` to create and post in one call.
+
+        When ``expiration`` is provided, it must be a Unix timestamp at least
+        3 minutes in the future. Use extra buffer for immediate submissions to
+        account for latency and clock skew.
+
+        Raises:
+            UserInputError: If order parameters are invalid.
+            SigningError: If the order cannot be signed.
+        """
+        return self._prepare_and_sign_limit_order(
+            asset_id=asset_id,
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            post_only=post_only,
+            expiration=expiration,
+            builder_code=builder_code,
+        )
+
+    @overload
+    def create_market_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["BUY"],
+        amount: Decimal | int | float | str,
+        max_spend: Decimal | int | float | str | None = None,
+        max_price: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FAK",
+        builder_code: str | None = None,
+    ) -> SignedOrder: ...
+    @overload
+    def create_market_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["SELL"],
+        shares: Decimal | int | float | str,
+        min_price: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FAK",
+        builder_code: str | None = None,
+    ) -> SignedOrder: ...
+    def create_market_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: OrderSide,
+        amount: Decimal | int | float | str | None = None,
+        shares: Decimal | int | float | str | None = None,
+        max_spend: Decimal | int | float | str | None = None,
+        max_price: Decimal | int | float | str | None = None,
+        min_price: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FAK",
+        builder_code: str | None = None,
+    ) -> SignedOrder:
+        """Create and sign a market order without posting it.
+
+        BUY orders use ``amount`` as the spend amount and may include
+        ``max_spend`` and ``max_price``. SELL orders use ``shares`` as the
+        number of shares to sell and may include ``min_price``.
+
+        ``max_price`` and ``min_price`` bound the execution price: fills happen at
+        the resting order's price, never worse than the bound. Because order
+        amounts have fixed precision, the price encoded in a signed BUY may sit
+        fractionally above ``max_price``, but cannot reach a higher price on any
+        supported tick grid, even if the market's tick becomes finer. Metadata
+        is refreshed once if rounding is unsafe; if the cap still cannot be
+        preserved, ``UserInputError`` is raised before signing or posting.
+        Sub-cent digits of ``amount`` are dropped and the share count is floored
+        to the market's amount precision, so a fraction of a share's worth of
+        ``amount`` may go unspent.
+
+        ``max_spend`` is an estimated all-in spend target based on recently
+        resolved platform and builder fee rates. Actual fees may change before
+        execution.
+
+        Raises:
+            UserInputError: If side-specific order parameters are invalid.
+            InsufficientLiquidityError: If available liquidity cannot fill the order.
+            SigningError: If the order cannot be signed.
+        """
+        return self._prepare_and_sign_market_order(
+            asset_id=asset_id,
+            token_id=token_id,
+            side=side,
+            amount=amount,
+            shares=shares,
+            max_spend=max_spend,
+            max_price=max_price,
+            min_price=min_price,
+            order_type=order_type,
+            builder_code=builder_code,
+        )
+
+    def place_limit_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        price: Decimal | int | float | str,
+        size: Decimal | int | float | str,
+        side: OrderSide,
+        post_only: bool = False,
+        expiration: int | None = None,
+        builder_code: str | None = None,
+    ) -> OrderResponse:
+        """Create, sign, and post a limit order.
+
+        When ``expiration`` is provided, it must be a Unix timestamp at least
+        3 minutes in the future. Use extra buffer for immediate submissions to
+        account for latency and clock skew.
+
+        Raises:
+            UserInputError: If order parameters are invalid.
+            InsufficientAllowanceError: If required allowance cannot be recovered.
+            SigningError: If the order cannot be signed.
+            RequestRejectedError: If posting the order is rejected.
+        """
+        signed = self._prepare_and_sign_limit_order(
+            asset_id=asset_id,
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            post_only=post_only,
+            expiration=expiration,
+            builder_code=builder_code,
+        )
+        return post_order_with_allowance_recovery_sync(self, signed)
+
+    @overload
+    def place_market_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["BUY"],
+        amount: Decimal | int | float | str,
+        max_spend: Decimal | int | float | str | None = None,
+        max_price: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FAK",
+        builder_code: str | None = None,
+    ) -> OrderResponse: ...
+    @overload
+    def place_market_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: Literal["SELL"],
+        shares: Decimal | int | float | str,
+        min_price: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FAK",
+        builder_code: str | None = None,
+    ) -> OrderResponse: ...
+    def place_market_order(
+        self,
+        *,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+        side: OrderSide,
+        amount: Decimal | int | float | str | None = None,
+        shares: Decimal | int | float | str | None = None,
+        max_spend: Decimal | int | float | str | None = None,
+        max_price: Decimal | int | float | str | None = None,
+        min_price: Decimal | int | float | str | None = None,
+        order_type: MarketOrderType = "FAK",
+        builder_code: str | None = None,
+    ) -> OrderResponse:
+        """Create, sign, and post a market order.
+
+        BUY orders use ``amount`` as the spend amount and may include
+        ``max_spend`` and ``max_price``. SELL orders use ``shares`` as the
+        number of shares to sell and may include ``min_price``.
+
+        ``max_price`` and ``min_price`` bound the execution price: fills happen at
+        the resting order's price, never worse than the bound. Because order
+        amounts have fixed precision, the price encoded in a signed BUY may sit
+        fractionally above ``max_price``, but cannot reach a higher price on any
+        supported tick grid, even if the market's tick becomes finer. Metadata
+        is refreshed once if rounding is unsafe; if the cap still cannot be
+        preserved, ``UserInputError`` is raised before signing or posting.
+        Sub-cent digits of ``amount`` are dropped and the share count is floored
+        to the market's amount precision, so a fraction of a share's worth of
+        ``amount`` may go unspent.
+
+        ``max_spend`` is an estimated all-in spend target based on recently
+        resolved platform and builder fee rates. Actual fees may change before
+        execution.
+
+        Raises:
+            UserInputError: If side-specific order parameters are invalid.
+            InsufficientLiquidityError: If available liquidity cannot fill the order.
+            InsufficientAllowanceError: If required allowance cannot be recovered.
+            SigningError: If the order cannot be signed.
+            RequestRejectedError: If posting the order is rejected.
+        """
+        signed = self._prepare_and_sign_market_order(
+            asset_id=asset_id,
+            token_id=token_id,
+            side=side,
+            amount=amount,
+            shares=shares,
+            max_spend=max_spend,
+            max_price=max_price,
+            min_price=min_price,
+            order_type=order_type,
+            builder_code=builder_code,
+        )
+        return post_order_with_allowance_recovery_sync(self, signed)
+
+    def get_builder_fee_rates(self, builder_code: str) -> BuilderFeeRates:
+        """Get fee rates for a builder code."""
+        from market_sdk._internal.actions.orders.market_data import fetch_builder_fee_rates_sync
+
+        return fetch_builder_fee_rates_sync(self._ctx, builder_code=builder_code)
+
+    def post_order(self, signed_order: SignedOrder) -> OrderResponse:
+        """Post a signed order for the authenticated account."""
+        self._ensure_geoblock_allowed()
+        path, payload = _post_actions.build_post_order_request(
+            signed_order, owner_api_key=self._ctx.credentials.key
+        )
+        return _post_actions.parse_order_response(
+            self._ctx.secure_clob.post_json(path, json=payload)
+        )
+
+    def post_orders(self, signed_orders: Sequence[SignedOrder]) -> tuple[OrderResponse, ...]:
+        """Post multiple signed orders for the authenticated account."""
+        self._ensure_geoblock_allowed()
+        path, payload = _post_actions.build_post_orders_request(
+            signed_orders, owner_api_key=self._ctx.credentials.key
+        )
+        return _post_actions.parse_order_responses(
+            self._ctx.secure_clob.post_json(path, json=payload)
+        )
+
+    def wait_for_order_fill_settlement(
+        self,
+        order: AcceptedOrder,
+        *,
+        timeout_s: float = DEFAULT_SETTLEMENT_TIMEOUT_S,
+    ) -> tuple[TransactionHash, ...]:
+        """Wait until every fill listed in an order response settles.
+
+        Settlement covers the fills listed in this order response, identified
+        by the order's ``trade_ids``. These are the fills that happened
+        immediately when the order was accepted. This method does not wait for
+        later fills of any remaining quantity resting on the book. Fills that
+        fail execution contribute no hash.
+
+        Returns:
+            The settlement transaction hashes of the order's fills.
+
+        Raises:
+            TimeoutError: If fills are still settling when the timeout elapses.
+                The order placement itself is unaffected.
+            TransactionFailedError: If every fill failed execution.
+        """
+        return _settlement_actions.wait_for_order_fill_settlement_sync(
+            self._ctx.secure_clob, order, timeout_s=timeout_s
+        )
+
+    def cancel_order(self, *, order_id: str) -> CancelOrdersResponse:
+        """Cancel one open order for the authenticated account."""
+        path, body = _cancel_actions.build_cancel_order_request(order_id=order_id)
+        return _cancel_actions.parse_cancel_orders_response(
+            self._ctx.secure_clob.delete_json(path, json=body)
+        )
+
+    def cancel_orders(self, *, order_ids: Sequence[str]) -> CancelOrdersResponse:
+        """Cancel multiple open orders for the authenticated account."""
+        path, body = _cancel_actions.build_cancel_orders_request(order_ids=order_ids)
+        return _cancel_actions.parse_cancel_orders_response(
+            self._ctx.secure_clob.delete_json(path, json=body)
+        )
+
+    def cancel_all(self) -> CancelOrdersResponse:
+        """Cancel all open orders for the authenticated account."""
+        path, body = _cancel_actions.build_cancel_all_request()
+        return _cancel_actions.parse_cancel_orders_response(
+            self._ctx.secure_clob.delete_json(path, json=body)
+        )
+
+    def cancel_market_orders(
+        self,
+        *,
+        market: str | None = None,
+        asset_id: str | None = None,
+        token_id: str | None = None,
+    ) -> CancelOrdersResponse:
+        """Cancel open orders matching a market or CLOB asset filter."""
+        path, body = _cancel_actions.build_cancel_market_orders_request(
+            market=market,
+            asset_id=asset_id,
+            token_id=token_id,
+        )
+        return _cancel_actions.parse_cancel_orders_response(
+            self._ctx.secure_clob.delete_json(path, json=body)
+        )
+
+    def _prepare_and_sign_limit_order(
+        self,
+        *,
+        asset_id: str | None,
+        token_id: str | None,
+        price: Decimal | int | float | str,
+        size: Decimal | int | float | str,
+        side: OrderSide,
+        post_only: bool,
+        expiration: int | None,
+        builder_code: str | None,
+    ) -> SignedOrder:
+        self._ensure_geoblock_allowed()
+        params = validate_limit_order_params(
+            asset_id=asset_id,
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            post_only=post_only,
+            expiration=expiration,
+            builder_code=get_site_order_context().get("builder_code", builder_code),
+        )
+        draft = prepare_limit_order_draft_sync(self._ctx, params)
+        return self._sign_order(draft, post_only=params.post_only)
+
+    def _prepare_and_sign_market_order(
+        self,
+        *,
+        asset_id: str | None,
+        token_id: str | None,
+        side: OrderSide,
+        amount: Decimal | int | float | str | None,
+        shares: Decimal | int | float | str | None,
+        max_spend: Decimal | int | float | str | None,
+        max_price: Decimal | int | float | str | None,
+        min_price: Decimal | int | float | str | None,
+        order_type: MarketOrderType,
+        builder_code: str | None,
+    ) -> SignedOrder:
+        self._ensure_geoblock_allowed()
+        params = validate_market_order_params(
+            asset_id=asset_id,
+            token_id=token_id,
+            side=side,
+            amount=amount,
+            shares=shares,
+            max_spend=max_spend,
+            max_price=max_price,
+            min_price=min_price,
+            order_type=order_type,
+            builder_code=get_site_order_context().get("builder_code", builder_code),
+        )
+        draft = prepare_market_order_draft_sync(self._ctx, params)
+        return self._sign_order(draft, post_only=False)
+
+    def _sign_order(self, draft: OrderDraft, *, post_only: bool) -> SignedOrder:
+        unsigned = create_unsigned_order(
+            draft, wallet=self._ctx.wallet, wallet_type=self._ctx.wallet_type
+        )
+        typed_data = build_order_typed_data(unsigned)
+        try:
+            signed_message = self._ctx.signer.sign_typed_data(full_message=typed_data)
+        except Exception as error:
+            raise SigningError(f"Failed to sign order: {error}") from error
+        raw_hex = signed_message.signature.hex()
+        signature_hex = HexString(raw_hex if raw_hex.startswith("0x") else "0x" + raw_hex)
+        final_signature = wrap_deposit_wallet_signature(
+            signer=self._ctx.signer.address,
+            signer_type=self._ctx.signer_type,
+            signature=build_order_signature(unsigned, signature_hex),
+        )
+        return create_signed_order(unsigned, final_signature, post_only=post_only)
+
+    def get_order_scoring(self, *, order_id: str) -> bool:
+        """Return whether an order is currently scoring rewards."""
+        path, params = _rewards_actions.build_get_order_scoring_request(order_id=order_id)
+        return _rewards_actions.parse_order_scoring(
+            self._ctx.secure_clob.get_json(path, params=params)
+        )
+
+    def get_orders_scoring(self, *, order_ids: Sequence[str]) -> dict[str, bool]:
+        """Return reward-scoring status for multiple orders."""
+        path, body = _rewards_actions.build_get_orders_scoring_request(order_ids=order_ids)
+        return _rewards_actions.parse_orders_scoring(
+            self._ctx.secure_clob.post_json(path, json=body)
+        )
+
+    def list_user_earnings_for_day(self, *, date: str) -> Paginator[UserEarning]:
+        """List reward earnings for the authenticated user on a date.
+
+        Returns:
+            A paginator over matching earning entries.
+        """
+
+        def fetch(cursor: str | None) -> Page[UserEarning]:
+            path, params = _rewards_actions.build_list_user_earnings_for_day_request(
+                date=date,
+                signature_type=signature_type_for(self._ctx.wallet_type),
+                cursor=cursor,
+            )
+            return _rewards_actions.parse_user_earnings_page(
+                self._ctx.secure_clob.get_json(path, params=params)
+            )
+
+        return Paginator(fetch=fetch)
+
+    def get_total_earnings_for_user_for_day(
+        self, *, date: str, sponsored: bool | None = None
+    ) -> tuple[TotalUserEarning, ...]:
+        """Get total reward earnings for the authenticated user on a date.
+
+        Set ``sponsored=True`` to include sponsored rewards and the native/sponsored
+        breakdown. Omitted or false returns native rewards only. Absent breakdown
+        fields remain ``None``.
+        """
+        path, params = _rewards_actions.build_total_user_earnings_for_day_request(
+            date=date, signature_type=signature_type_for(self._ctx.wallet_type), sponsored=sponsored
+        )
+        return _rewards_actions.parse_total_user_earnings(
+            self._ctx.secure_clob.get_json(path, params=params)
+        )
+
+    def list_user_earnings_and_markets_config(
+        self,
+        *,
+        date: str,
+        no_competition: bool | None = None,
+        order_by: str | None = None,
+        position: str | None = None,
+        page_size: int | None = None,
+    ) -> Paginator[UserRewardsEarning]:
+        """List reward earnings with market configuration for the authenticated user.
+
+        Returns:
+            A paginator over matching reward earning entries.
+        """
+
+        def fetch(cursor: str | None) -> Page[UserRewardsEarning]:
+            path, params = _rewards_actions.build_list_user_earnings_and_markets_config_request(
+                date=date,
+                signature_type=signature_type_for(self._ctx.wallet_type),
+                no_competition=no_competition,
+                order_by=order_by,
+                position=position,
+                page_size=page_size,
+                cursor=cursor,
+            )
+            return _rewards_actions.parse_user_rewards_earnings_page(
+                self._ctx.secure_clob.get_json(path, params=params)
+            )
+
+        return Paginator(fetch=fetch)
+
+    def get_reward_percentages(self) -> RewardsPercentages:
+        """Get current reward percentage allocations for the authenticated account."""
+        path, params = _rewards_actions.build_get_reward_percentages_request(
+            signature_type=signature_type_for(self._ctx.wallet_type)
+        )
+        return _rewards_actions.parse_reward_percentages(
+            self._ctx.secure_clob.get_json(path, params=params)
+        )
+
+    def approve_erc20(
+        self,
+        *,
+        token_address: str,
+        spender_address: str,
+        amount: int | Literal["max"],
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Submit an ERC-20 approval transaction.
+
+        Args:
+            amount: Base-units amount to approve, or ``"max"`` for the maximum value.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+        """
+        try:
+            token = cast(EvmAddress, to_checksum_address(token_address))
+        except ValueError as error:
+            raise UserInputError(f"Invalid token_address: {error}") from error
+        try:
+            spender = cast(EvmAddress, to_checksum_address(spender_address))
+        except ValueError as error:
+            raise UserInputError(f"Invalid spender_address: {error}") from error
+        resolved_amount = MAX_UINT256 if amount == "max" else amount
+        call = erc20_approval_call(token_address=token, spender=spender, amount=resolved_amount)
+        resolved_metadata = (
+            metadata if metadata is not None else f"Approve {amount} of {token} to {spender}"
+        )
+        return self._dispatch_single_call(call, metadata=resolved_metadata)
+
+    def approve_erc1155_for_all(
+        self,
+        *,
+        token_address: str,
+        operator_address: str,
+        approved: bool = True,
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Approve or revoke an ERC-1155 operator for all tokens.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+        """
+        try:
+            token = cast(EvmAddress, to_checksum_address(token_address))
+        except ValueError as error:
+            raise UserInputError(f"Invalid token_address: {error}") from error
+        try:
+            operator = cast(EvmAddress, to_checksum_address(operator_address))
+        except ValueError as error:
+            raise UserInputError(f"Invalid operator_address: {error}") from error
+        call = erc1155_set_approval_for_all_call(
+            token_address=token, operator=operator, approved=approved
+        )
+        verb = "Approve" if approved else "Revoke"
+        resolved_metadata = metadata if metadata is not None else f"{verb} {operator} on {token}"
+        return self._dispatch_single_call(call, metadata=resolved_metadata)
+
+    def transfer_erc20(
+        self,
+        *,
+        token_address: str,
+        recipient_address: str,
+        amount: int,
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Submit an ERC-20 transfer transaction.
+
+        Args:
+            amount: Base-units amount to transfer.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+        """
+        try:
+            token = cast(EvmAddress, to_checksum_address(token_address))
+        except ValueError as error:
+            raise UserInputError(f"Invalid token_address: {error}") from error
+        try:
+            recipient = cast(EvmAddress, to_checksum_address(recipient_address))
+        except ValueError as error:
+            raise UserInputError(f"Invalid recipient_address: {error}") from error
+        call = erc20_transfer_call(token_address=token, recipient=recipient, amount=amount)
+        resolved_metadata = (
+            metadata if metadata is not None else f"Transfer {amount} of {token} to {recipient}"
+        )
+        return self._dispatch_single_call(call, metadata=resolved_metadata)
+
+    def get_trading_approvals_state(self, *, wallet: str | None = None) -> TradingApprovalsState:
+        """Get missing trading approvals for a wallet or the authenticated wallet.
+
+        Recent grants or revocations can take time to appear. Reads use indexed
+        state from the configured environment, not the RPC endpoint.
+        setup_trading_approvals checks RPC directly.
+        """
+        return sync_dispatch(
+            self._ctx,
+            build_get_trading_approvals_state_spec(
+                wallet=self._ctx.wallet if wallet is None else wallet,
+                config=self._ctx.environment_config,
+            ),
+        )
+
+    def setup_trading_approvals(self) -> SyncDeprecatedTransactionHandle:
+        """Approve the standard set of trading allowances for the wallet.
+
+        EOA wallets submit approvals directly. Gasless wallets submit a relayed
+        transaction. Already-approved allowances are skipped, and the method waits
+        internally for any submitted transactions.
+
+        Returns:
+            A deprecated compatibility handle whose ``wait()`` returns immediately.
+        """
+        state = get_trading_approvals_state_sync(
+            self._ctx.rpc, wallet=self._ctx.wallet, config=self._ctx.environment_config
+        )
+        calls = build_missing_trading_approval_calls(state.missing)
+        if not calls:
+            return SyncDeprecatedTransactionHandle()
+        if self._ctx.wallet_type == "EOA":
+            for call in calls:
+                handle = self._broadcast_eoa_call(call)
+                handle.wait()
+            return SyncDeprecatedTransactionHandle()
+        handle = prepare_gasless_transaction_sync(
+            self._ctx, calls=calls, metadata="Trading setup approvals"
+        )
+        handle.wait()
+        return SyncDeprecatedTransactionHandle()
+
+    def setup_gasless_wallet(self) -> Self:
+        """Return this client.
+
+        Deprecated. Secure client creation now sets up the wallet required for
+        the selected trading flow.
+        """
+        return self
+
+    def is_gasless_ready(self) -> bool:
+        """Return True.
+
+        Deprecated. Secure client creation now performs the required wallet setup.
+        """
+        return True
+
+    def execute_transaction(
+        self,
+        *,
+        calls: Sequence[TransactionCall],
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Submit one or more transaction calls for the authenticated wallet.
+
+        Use this low-level escape hatch to combine supported transaction calls
+        differently than the higher-level SDK workflows. Calls are executed in order.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+        """
+        return self._dispatch_calls(
+            list(calls), metadata=metadata if metadata is not None else "Execute transaction"
+        )
+
+    def split_position(
+        self,
+        *,
+        condition_id: str | None = None,
+        legs: Sequence[str] | None = None,
+        amount: int,
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Split collateral into market or combo positions.
+
+        Provide exactly one of ``condition_id`` for market positions or ``legs``
+        for combo positions.
+
+        Args:
+            amount: Base-units collateral amount to split.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+        """
+        if (condition_id is None) == (legs is None):
+            raise UserInputError("Provide exactly one of condition_id or legs")
+        if legs is not None:
+            raise UserInputError("Combo positions require an unavailable protocol V2 router")
+            if amount <= 0:
+                raise UserInputError("Split amount must be positive for combo positions")
+            canonical_legs = canonicalize_combo_legs(legs)
+            combo = derive_combo_position_context(canonical_legs)
+            calls = [
+                combinatorial_prepare_condition_call(
+                    combinatorial_module=cast(
+                        EvmAddress, self._ctx.environment_config.combinatorial_module
+                    ),
+                    legs=list(canonical_legs),
+                ),
+                split_v2_call(
+                    router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                    condition_id=combo.condition_id,
+                    amount=amount,
+                ),
+            ]
+            resolved_metadata = (
+                metadata
+                if metadata is not None
+                else f"Split {amount} combo positions for condition {combo.condition_id}"
+            )
+            return self._dispatch_calls(calls, metadata=resolved_metadata)
+        assert condition_id is not None
+        context = self._resolve_market_position_context(condition_id=condition_id)
+        if context.protocol == "ctf":
+            assert context.adapter_address is not None
+            call = split_position_call(
+                target=context.adapter_address,
+                collateral=cast(EvmAddress, self._ctx.environment_config.collateral_token),
+                condition_id=context.condition_id,
+                amount=amount,
+            )
+        else:
+            call = split_v2_call(
+                router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                condition_id=context.condition_id,
+                amount=amount,
+            )
+        resolved_metadata = (
+            metadata
+            if metadata is not None
+            else f"Split {amount} positions for condition {context.condition_id}"
+        )
+        return self._dispatch_single_call(call, metadata=resolved_metadata)
+
+    def merge_positions(
+        self,
+        *,
+        condition_id: str | None = None,
+        legs: Sequence[str] | None = None,
+        amount: int | Literal["max"],
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Merge market or combo positions back into collateral.
+
+        Provide exactly one of ``condition_id`` for market positions or ``legs``
+        for combo positions.
+
+        Args:
+            amount: Base-units position amount to merge, or ``"max"`` to merge
+                the largest available balanced amount.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+        """
+        if (condition_id is None) == (legs is None):
+            raise UserInputError("Provide exactly one of condition_id or legs")
+        if legs is not None:
+            raise UserInputError("Combo positions require an unavailable protocol V2 router")
+            canonical_legs = canonicalize_combo_legs(legs)
+            combo = derive_combo_position_context(canonical_legs)
+            balance_call = erc1155_balance_of_batch_call(
+                token_address=cast(EvmAddress, self._ctx.environment_config.position_manager),
+                owners=[self._ctx.wallet, self._ctx.wallet],
+                token_ids=list(combo.position_ids),
+            )
+            balances = decode_erc1155_balance_of_batch_result(
+                self._ctx.rpc.eth_call(to=str(balance_call.to), data=balance_call.data)
+            )
+            resolved_amount = resolve_merge_amount_from_balances(
+                combo.condition_id, balances, amount
+            )
+            calls = [
+                combinatorial_prepare_condition_call(
+                    combinatorial_module=cast(
+                        EvmAddress, self._ctx.environment_config.combinatorial_module
+                    ),
+                    legs=list(canonical_legs),
+                ),
+                merge_v2_call(
+                    router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                    condition_id=combo.condition_id,
+                    amount=resolved_amount,
+                ),
+            ]
+            resolved_metadata = (
+                metadata
+                if metadata is not None
+                else f"Merge {resolved_amount} combo positions for condition {combo.condition_id}"
+            )
+            return self._dispatch_calls(calls, metadata=resolved_metadata)
+        assert condition_id is not None
+        context = self._resolve_market_position_context(condition_id=condition_id)
+        balance_call = erc1155_balance_of_batch_call(
+            token_address=context.position_erc1155_address,
+            owners=[self._ctx.wallet, self._ctx.wallet],
+            token_ids=[str(token_id) for token_id in context.token_ids],
+        )
+        balances = decode_erc1155_balance_of_batch_result(
+            self._ctx.rpc.eth_call(to=str(balance_call.to), data=balance_call.data)
+        )
+        resolved_amount = resolve_merge_amount_from_balances(context.condition_id, balances, amount)
+        if context.protocol == "ctf":
+            assert context.adapter_address is not None
+            call = merge_positions_call(
+                target=context.adapter_address,
+                collateral=cast(EvmAddress, self._ctx.environment_config.collateral_token),
+                condition_id=context.condition_id,
+                amount=resolved_amount,
+            )
+        else:
+            call = merge_v2_call(
+                router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                condition_id=context.condition_id,
+                amount=resolved_amount,
+            )
+        resolved_metadata = (
+            metadata
+            if metadata is not None
+            else f"Merge {resolved_amount} positions for condition {context.condition_id}"
+        )
+        return self._dispatch_single_call(call, metadata=resolved_metadata)
+
+    def merge_multiple_positions(
+        self,
+        *,
+        positions: Sequence[MergePositionRequest],
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Merge multiple market positions or Polymarket V2 positions into collateral.
+
+        Args:
+            positions: Position merge requests. Use ``position_id`` for a
+                Polymarket V2 position, or ``condition_id`` / ``market_id`` for
+                market positions. Do not mix identifier styles in the same batch.
+                Omit ``amount`` or pass ``"max"`` to merge the largest available
+                balanced amount for that condition.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+        """
+        if not positions:
+            raise UserInputError("positions must include at least one merge request")
+
+        normalized = [
+            normalize_batch_merge_position_request(cast(Mapping[str, object], position))
+            for position in positions
+        ]
+        batch_kinds = {position.kind for position in normalized}
+        if len(batch_kinds) != 1:
+            raise UserInputError("Cannot mix market and Polymarket V2 positions in one merge batch")
+        if "combo" in batch_kinds:
+            raise UserInputError("Position-ID merging requires an unavailable protocol V2 router")
+
+        seen_conditions: set[str] = set()
+        calls: list[TransactionCall] = []
+        for position in normalized:
+            if position.kind == "combo":
+                assert position.position_id is not None
+                decoded = decode_combo_outcome_position_id(position.position_id)
+                condition_key = str(decoded.condition_id)
+                if condition_key in seen_conditions:
+                    raise UserInputError(
+                        "position_ids must reference distinct Polymarket V2 conditions"
+                    )
+                seen_conditions.add(condition_key)
+                token_ids = derive_combo_outcome_position_ids(decoded.condition_id)
+                balance_call = erc1155_balance_of_batch_call(
+                    token_address=cast(EvmAddress, self._ctx.environment_config.position_manager),
+                    owners=[self._ctx.wallet, self._ctx.wallet],
+                    token_ids=list(token_ids),
+                )
+                balances = decode_erc1155_balance_of_batch_result(
+                    self._ctx.rpc.eth_call(to=str(balance_call.to), data=balance_call.data)
+                )
+                resolved_amount = resolve_merge_amount_from_balances(
+                    decoded.condition_id, balances, position.amount
+                )
+                calls.append(
+                    merge_v2_call(
+                        router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                        condition_id=decoded.condition_id,
+                        amount=resolved_amount,
+                    )
+                )
+                continue
+
+            context = self._resolve_market_position_context(
+                condition_id=position.condition_id,
+                market_id=position.market_id,
+            )
+            condition_key = str(context.condition_id)
+            if condition_key in seen_conditions:
+                raise UserInputError("positions must reference distinct market conditions")
+            seen_conditions.add(condition_key)
+            balance_call = erc1155_balance_of_batch_call(
+                token_address=context.position_erc1155_address,
+                owners=[self._ctx.wallet, self._ctx.wallet],
+                token_ids=[str(token_id) for token_id in context.token_ids],
+            )
+            balances = decode_erc1155_balance_of_batch_result(
+                self._ctx.rpc.eth_call(to=str(balance_call.to), data=balance_call.data)
+            )
+            resolved_amount = resolve_merge_amount_from_balances(
+                context.condition_id, balances, position.amount
+            )
+            if context.protocol == "ctf":
+                assert context.adapter_address is not None
+                calls.append(
+                    merge_positions_call(
+                        target=context.adapter_address,
+                        collateral=cast(EvmAddress, self._ctx.environment_config.collateral_token),
+                        condition_id=context.condition_id,
+                        amount=resolved_amount,
+                    )
+                )
+            else:
+                calls.append(
+                    merge_v2_call(
+                        router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                        condition_id=context.condition_id,
+                        amount=resolved_amount,
+                    )
+                )
+
+        batch_label = "Polymarket V2 positions" if "combo" in batch_kinds else "positions"
+        resolved_metadata = (
+            metadata if metadata is not None else f"Merge {len(calls)} {batch_label}"
+        )
+        return self.execute_transaction(calls=calls, metadata=resolved_metadata)
+
+    @overload
+    def redeem_positions(
+        self, *, condition_id: str, metadata: str | None = None
+    ) -> SyncTransactionHandle: ...
+    @overload
+    def redeem_positions(
+        self, *, market_id: str, metadata: str | None = None
+    ) -> SyncTransactionHandle: ...
+    @overload
+    def redeem_positions(
+        self, *, position_id: str, metadata: str | None = None
+    ) -> SyncTransactionHandle: ...
+    def redeem_positions(
+        self,
+        *,
+        condition_id: str | None = None,
+        market_id: str | None = None,
+        position_id: str | None = None,
+        metadata: str | None = None,
+    ) -> SyncTransactionHandle:
+        """Redeem resolved market positions or a Polymarket V2 position.
+
+        Provide exactly one of ``condition_id``, ``market_id``, or ``position_id``.
+        A ``position_id`` identifies a specific Polymarket V2 YES/NO position.
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+
+        Raises:
+            UserInputError: If both identifiers or neither identifier is provided.
+        """
+        if sum(value is not None for value in (condition_id, market_id, position_id)) != 1:
+            raise UserInputError("Provide exactly one of condition_id, market_id, or position_id")
+        if position_id is not None:
+            raise UserInputError(
+                "Position-ID redemption requires an unavailable protocol V2 router"
+            )
+            decoded = decode_combo_outcome_position_id(position_id)
+            balance_call = erc1155_balance_of_call(
+                token_address=cast(EvmAddress, self._ctx.environment_config.position_manager),
+                owner=self._ctx.wallet,
+                token_id=position_id,
+            )
+            balance = decode_erc1155_balance_of_result(
+                self._ctx.rpc.eth_call(to=str(balance_call.to), data=balance_call.data)
+            )
+            if balance == 0:
+                raise UserInputError("Position has no balance to redeem")
+            call = redeem_v2_call(
+                router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                condition_id=decoded.condition_id,
+                outcome_index=decoded.outcome_index,
+                amount=balance,
+            )
+            resolved_metadata = (
+                metadata if metadata is not None else f"Redeem position {position_id}"
+            )
+            return self._dispatch_single_call(call, metadata=resolved_metadata)
+        context = self._resolve_market_position_context(
+            condition_id=condition_id,
+            market_id=market_id,
+            closed=True,
+        )
+        if context.protocol == "ctf":
+            assert context.adapter_address is not None
+            if context.neg_risk:
+                balance_call = erc1155_balance_of_batch_call(
+                    token_address=context.position_erc1155_address,
+                    owners=[self._ctx.wallet, self._ctx.wallet],
+                    token_ids=[str(asset_id) for asset_id in context.outcome_ids],
+                )
+                balances = decode_erc1155_balance_of_batch_result(
+                    self._ctx.rpc.eth_call(to=str(balance_call.to), data=balance_call.data)
+                )
+                if len(balances) != 2:
+                    raise UnexpectedResponseError("Expected two position balances")
+                if not any(balances):
+                    raise UserInputError("Market positions have no balance to redeem")
+                calls = [
+                    neg_risk_redeem_positions_call(
+                        adapter=context.adapter_address,
+                        condition_id=context.condition_id,
+                        amounts=(balances[0], balances[1]),
+                    )
+                ]
+            else:
+                calls = [
+                    ctf_redeem_positions_call(
+                        ctf=context.adapter_address,
+                        collateral=cast(EvmAddress, self._ctx.environment_config.collateral_token),
+                        condition_id=context.condition_id,
+                    )
+                ]
+        else:
+            balance_call = erc1155_balance_of_batch_call(
+                token_address=context.position_erc1155_address,
+                owners=[self._ctx.wallet, self._ctx.wallet],
+                token_ids=[str(asset_id) for asset_id in context.outcome_ids],
+            )
+            balances = decode_erc1155_balance_of_batch_result(
+                self._ctx.rpc.eth_call(to=str(balance_call.to), data=balance_call.data)
+            )
+            if len(balances) != 2:
+                raise UnexpectedResponseError("Expected two position balances")
+            calls = [
+                redeem_v2_call(
+                    router=cast(EvmAddress, self._ctx.environment_config.protocol_v2_router),
+                    condition_id=context.condition_id,
+                    outcome_index=outcome_index,
+                    amount=balance,
+                )
+                for outcome_index, balance in enumerate(balances)
+                if balance > 0
+            ]
+            if not calls:
+                raise UserInputError(
+                    f"Market positions have no balance to redeem for condition "
+                    f"{context.condition_id}"
+                )
+        resolved_metadata = (
+            metadata
+            if metadata is not None
+            else f"Redeem positions for condition {context.condition_id}"
+        )
+        return self._dispatch_calls(calls, metadata=resolved_metadata)
+
+    def plan_collateral_return(self) -> CollateralReturnPlanResponse:
+        """Plan a collateral return for the authenticated wallet.
+
+        Builds an executable plan that unwinds redundant position value and
+        returns it to the wallet as collateral. Planning can take several
+        minutes for wallets with many positions. Inspect the plan — notably
+        ``net_pusd_out`` and ``position_summary`` — before executing it
+        with :meth:`execute_collateral_return_plan`.
+
+        Returns:
+            The collateral return plan. When ``truncated`` is True the plan
+            covers only the first executable chunk; execute it, then request
+            a fresh plan for the remainder.
+        """
+        return _combos_actions.plan_collateral_return_sync(self._ctx)
+
+    def execute_collateral_return_plan(
+        self, *, plan: CollateralReturnPlanResponse
+    ) -> SyncGaslessTransactionHandle:
+        """Execute a collateral return plan.
+
+        The plan executes exactly as returned by
+        :meth:`plan_collateral_return`; nothing is recomputed client-side.
+        No approval transactions are submitted implicitly.
+
+        Example::
+
+            plan = client.plan_collateral_return()
+            while plan.net_pusd_out > 0:
+                handle = client.execute_collateral_return_plan(plan=plan)
+                handle.wait()
+                if not plan.truncated:
+                    break
+                plan = client.plan_collateral_return()
+
+        Returns:
+            A transaction handle. Call ``wait()`` to wait for a terminal outcome.
+
+        Raises:
+            RequestRejectedError: With ``status`` 409 if the plan no longer
+                matches current wallet state; request a fresh plan and
+                execute that instead.
+        """
+        return _combos_actions.execute_collateral_return_plan_sync(self._ctx, plan=plan)
+
+    def request_combo_quote(
+        self,
+        *,
+        leg_position_ids: list[str] | tuple[str, ...],
+        direction: RfqDirection | str,
+        amount: Decimal | int | float | str | None = None,
+        size: Decimal | int | float | str | None = None,
+        side: RfqSide | str = RfqSide.YES,
+    ) -> ComboQuoteResult:
+        """Request a quote for a combo of positions.
+
+        BUY requests are sized in collateral via ``amount``; SELL requests
+        are sized in outcome tokens via ``size``. Amounts are human-readable:
+        ``1`` means one dollar or one full share, not one 6-decimal base
+        unit. Requires a Builder API Key passed as ``api_key=`` when
+        constructing the client.
+
+        The call resolves when the quote competition window closes. A request
+        that attracts no usable quotes is a normal outcome, returned with
+        ``quote=None`` and a ``reason`` rather than raised.
+
+        Returns:
+            The quote result. Pass ``result.quote`` to
+            :meth:`accept_combo_quote` to
+            execute the winning quote before ``quote.expires_at``.
+
+        Raises:
+            UserInputError: If the legs, direction/sizing pair, or side are
+                invalid, or the client has no Builder API Key.
+            RfqRequestRejectedError: If the request is rejected; inspect
+                ``code`` to distinguish permanent input problems from
+                transient conditions.
+        """
+        return _combo_rfq_actions.request_combo_quote_sync(
+            self._ctx,
+            leg_position_ids=leg_position_ids,
+            direction=direction,
+            amount=amount,
+            size=size,
+            side=side,
+        )
+
+    def accept_combo_quote(self, quote: ComboQuote | Mapping[str, object]) -> ComboQuoteAcceptance:
+        """Accept a self-contained combo quote and sign its order automatically.
+
+        The call resolves at the maker last-look outcome. A maker declining
+        or the acceptance window expiring is a normal outcome returned with
+        ``status="failed"`` and a ``reason``. ``status="executing"`` means
+        the trade was handed off for onchain execution; follow it with
+        :meth:`wait_for_combo_fill`.
+
+        A retry after an interrupted request or invalid response is safe: an
+        already-accepted RFQ reports its current status instead of executing
+        twice. In that case ``taker_order_hash`` is ``None`` because the
+        retry's order was not the one recorded.
+
+        Quotes can be persisted with ``quote.model_dump_json()`` and restored
+        with ``ComboQuote.model_validate_json(...)``. A JSON-decoded mapping is
+        also accepted directly. The accepting client must represent the same
+        account and builder identity used to request the quote. Treat restored
+        quote fields as signing-sensitive data and do not accept values modified
+        by an untrusted client.
+
+        Returns:
+            The acceptance outcome.
+
+        Raises:
+            UserInputError: If the quote is invalid or the client has no
+                Builder API Key.
+            RfqRequestRejectedError: If the acceptance is rejected.
+            TimeoutError: If the outcome is still pending after the wait
+                window; resume with :meth:`fetch_rfq_status`.
+        """
+        return _combo_rfq_actions.accept_combo_quote_sync(self._ctx, quote)
+
+    def wait_for_combo_fill(
+        self,
+        *,
+        rfq_id: str,
+        timeout: float = 30.0,
+        polling_interval: float = 1.0,
+    ) -> ComboFillResult:
+        """Wait for an accepted RFQ to reach a terminal state.
+
+        Polls the RFQ status until it is filled (or confirmed onchain),
+        failed, expired, or canceled. Terminal failure is a normal outcome
+        and is returned, not raised.
+
+        Returns:
+            The terminal state. ``tx_hash`` is set when the RFQ filled.
+
+        Raises:
+            TimeoutError: If the RFQ stays non-terminal past ``timeout``
+                seconds. This does not mean the trade failed; resume with
+                :meth:`fetch_rfq_status`.
+            RfqRequestRejectedError: If the RFQ is unknown or not accepted.
+        """
+        return _combo_rfq_actions.wait_for_combo_fill_sync(
+            self._ctx, rfq_id=rfq_id, timeout=timeout, polling_interval=polling_interval
+        )
+
+    def fetch_rfq_status(self, *, rfq_id: str) -> RfqStatusResult:
+        """Fetch the status of an accepted RFQ.
+
+        Status is available once an acceptance has been recorded; earlier
+        reads are rejected.
+
+        Returns:
+            The RFQ status. Onchain execution progress is merged into
+            ``status``.
+
+        Raises:
+            RfqRequestRejectedError: If the RFQ is unknown or not accepted.
+        """
+        return _combo_rfq_actions.fetch_rfq_status_sync(self._ctx, rfq_id=rfq_id)
+
+    def _broadcast_eoa_call(self, call: TransactionCall) -> SyncEoaTransactionHandle:
+        return broadcast_eoa_call_sync(
+            rpc=self._ctx.rpc,
+            signer=self._ctx.signer,
+            call=call,
+            chain_id=self._ctx.environment_config.chain_id,
+            max_polls=self._ctx.environment_config.relayer_max_polls,
+            poll_delay_s=self._ctx.environment_config.relayer_poll_frequency_ms / 1000,
+        )
+
+    def _dispatch_single_call(
+        self, call: TransactionCall, *, metadata: str
+    ) -> SyncTransactionHandle:
+        if self._ctx.wallet_type == "EOA":
+            return self._broadcast_eoa_call(call)
+        return prepare_gasless_transaction_sync(self._ctx, calls=[call], metadata=metadata)
+
+    def _dispatch_calls(
+        self, calls: list[TransactionCall], *, metadata: str
+    ) -> SyncTransactionHandle:
+        if not calls:
+            raise UserInputError("At least one transaction call is required")
+        if self._ctx.wallet_type == "EOA":
+            for call in calls[:-1]:
+                self._broadcast_eoa_call(call).wait()
+            return self._broadcast_eoa_call(calls[-1])
+        return prepare_gasless_transaction_sync(self._ctx, calls=calls, metadata=metadata)
+
+    def _ensure_wallet_ready(self) -> Self:
+        ctx = self._ctx
+        if ctx.wallet_type == "EOA":
+            return self
+        deployed = fetch_deployed_sync(
+            ctx.relayer,
+            address=str(ctx.wallet),
+            type=_relayer_transaction_type_for_wallet(ctx.wallet_type),
+        )
+        if deployed:
+            return self
+        if ctx.wallet_type == "DEPOSIT_WALLET":
+            self._deploy_default_deposit_wallet()
+            return self
+        raise UserInputError(
+            f"Wallet {ctx.wallet} does not exist. Provide an existing wallet address, "
+            "or omit wallet to use the default Deposit Wallet flow."
+        )
+
+    def _deploy_default_deposit_wallet(self) -> None:
+        ctx = self._ctx
+        current_deposit_wallet = derive_beacon_deposit_wallet_address(
+            ctx.signer.address, ctx.environment_config.wallet_derivation
+        )
+        if str(ctx.wallet).lower() != current_deposit_wallet.lower():
+            raise UserInputError(
+                f"Wallet {ctx.wallet} does not match the expected Deposit Wallet "
+                f"{current_deposit_wallet} for this signer, nor a deployed wallet address."
+            )
+        handle = submit_deposit_wallet_create_sync(ctx, metadata="Deploy Deposit Wallet")
+        handle.wait()
+
+    def _resolve_market_position_context(
+        self,
+        *,
+        condition_id: str | None = None,
+        market_id: str | None = None,
+        closed: bool | None = None,
+    ) -> MarketPositionContext:
+        if (condition_id is None) == (market_id is None):
+            raise UserInputError("Provide exactly one of condition_id or market_id")
+        if condition_id is not None:
+            context = f"condition {condition_id}"
+            if closed is None:
+                page = self.list_markets(condition_ids=[condition_id], page_size=1).first_page()
+            else:
+                page = self.list_markets(
+                    condition_ids=[condition_id], closed=closed, page_size=1
+                ).first_page()
+        else:
+            assert market_id is not None
+            context = f"market {market_id}"
+            if closed is None:
+                page = self.list_markets(ids=[parse_market_id(market_id)], page_size=1).first_page()
+            else:
+                page = self.list_markets(
+                    ids=[parse_market_id(market_id)], closed=closed, page_size=1
+                ).first_page()
+        markets = page.items
+        if not markets:
+            raise UserInputError(f"No market found for {context}")
+        if len(markets) != 1:
+            raise UserInputError(f"Expected exactly one market for {context}, got {len(markets)}")
+        return normalize_market_position_context(
+            markets[0],
+            context=context,
+            collateral_adapter=cast(EvmAddress, self._ctx.environment_config.collateral_adapter),
+            neg_risk_collateral_adapter=cast(
+                EvmAddress, self._ctx.environment_config.neg_risk_collateral_adapter
+            ),
+            conditional_tokens=cast(EvmAddress, self._ctx.environment_config.conditional_tokens),
+            neg_risk_adapter=cast(EvmAddress, self._ctx.environment_config.neg_risk_adapter),
+            position_manager=cast(EvmAddress, self._ctx.environment_config.position_manager),
+        )
+
+
+def _bootstrap_credentials_sync(
+    *,
+    config: EnvironmentConfig,
+    signer: LocalAccount,
+    clob: SyncTransport,
+    provided: ApiKeyCreds | None,
+    nonce: int,
+    validate: bool,
+    logger: logging.Logger | None,
+) -> ApiKeyCreds:
+    if provided is not None and (
+        not validate
+        or _credentials_are_active_sync(
+            config=config,
+            signer=signer,
+            credentials=provided,
+            logger=logger,
+        )
+    ):
+        return provided
+
+    signature = sign_api_key_auth(
+        signer,
+        chain_id=config.chain_id,
+        timestamp=int(time.time()),
+        nonce=nonce,
+    )
+    return _auth_actions.create_or_derive_api_key_sync(clob, signature)
+
+
+def _resolve_requested_wallet_sync(
+    *,
+    signer: LocalAccount,
+    wallet: str | None,
+    config: EnvironmentConfig,
+    logger: logging.Logger | None,
+) -> str:
+    if wallet is not None:
+        return wallet
+    legacy_deposit_wallet = derive_uups_deposit_wallet_address(
+        signer.address, config.wallet_derivation
+    )
+    relayer = SyncTransport(base_url=config.relayer_url, logger=logger)
+    try:
+        if fetch_deployed_sync(
+            relayer,
+            address=legacy_deposit_wallet,
+            type=RelayerTransactionType.WALLET,
+        ):
+            return legacy_deposit_wallet
+        return derive_beacon_deposit_wallet_address(signer.address, config.wallet_derivation)
+    finally:
+        relayer.close()
+
+
+def _relayer_transaction_type_for_wallet(
+    wallet_type: WalletType,
+) -> RelayerTransactionType | None:
+    if wallet_type == "DEPOSIT_WALLET":
+        return RelayerTransactionType.WALLET
+    if wallet_type == "POLY_PROXY":
+        return RelayerTransactionType.PROXY
+    if wallet_type == "GNOSIS_SAFE":
+        return RelayerTransactionType.SAFE
+    return None
+
+
+def _credentials_are_active_sync(
+    *,
+    config: EnvironmentConfig,
+    signer: LocalAccount,
+    credentials: ApiKeyCreds,
+    logger: logging.Logger | None,
+) -> bool:
+    probe = SyncTransport(
+        base_url=config.clob_url,
+        logger=logger,
+        header_resolver=_make_l2_header_resolver_sync(signer, credentials),
+    )
+    try:
+        keys = _auth_actions.fetch_api_keys_sync(probe)
+    except RequestRejectedError as error:
+        if error.status == 401:
+            return False
+        raise
+    finally:
+        probe.close()
+    return credentials.key in keys
+
+
+def _make_builder_gateway_header_resolver_sync(
+    api_key: ApiKey | None, signer: LocalAccount, credentials: ApiKeyCreds
+) -> SyncHeaderResolver:
+    l2_resolver = _make_l2_header_resolver_sync(signer, credentials)
+
+    def resolver(method: str, path: str, body: str | None) -> Mapping[str, str]:
+        headers = dict(l2_resolver(method, path, body))
+        # Status reads authenticate with account headers only; builder
+        # headers are required on the mutating requests.
+        if method != "GET" and isinstance(api_key, BuilderApiKey):
+            headers.update(
+                build_builder_key_headers(creds=api_key, method=method, path=path, body=body)
+            )
+        return headers
+
+    return resolver
+
+
+def _make_l2_header_resolver_sync(
+    signer: LocalAccount, credentials: ApiKeyCreds
+) -> SyncHeaderResolver:
+    def resolver(method: str, path: str, body: str | None) -> Mapping[str, str]:
+        timestamp = int(time.time())
+        signature = build_hmac_signature(
+            secret=credentials.secret,
+            timestamp=timestamp,
+            method=method,
+            path=path,
+            body=body,
+        )
+        return {
+            "KUEST_ADDRESS": signer.address,
+            "KUEST_API_KEY": credentials.key,
+            "KUEST_PASSPHRASE": credentials.passphrase,
+            "KUEST_SIGNATURE": signature,
+            "KUEST_TIMESTAMP": str(timestamp),
+        }
+
+    return resolver

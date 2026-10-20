@@ -1,0 +1,110 @@
+from market_sdk._internal.actions.relayer.calls import (
+    MAX_UINT256,
+    ctf_redeem_positions_call,
+    erc20_approval_call,
+    erc20_transfer_call,
+    erc1155_set_approval_for_all_call,
+    merge_positions_call,
+    split_position_call,
+)
+from market_sdk.types import EvmAddress
+
+_USDC = EvmAddress("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+_CTF = EvmAddress("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
+_NEG_RISK_ADAPTER = EvmAddress("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296")
+_CONDITION_ID = "0x" + "11" * 32
+_RECIPIENT = EvmAddress("0x000000000000000000000000000000000000dEaD")
+
+
+def test_erc20_approve_ctf_max_uint256_matches_ts_fixture() -> None:
+    call = erc20_approval_call(token_address=_USDC, spender=_CTF, amount=MAX_UINT256)
+    assert call.data == (
+        "0x095ea7b3"
+        "0000000000000000000000004d97dcd97ec945f40cf65f87097ace5ea0476045"
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    )
+
+
+def test_erc20_transfer_one_token_unit_known_vector() -> None:
+    call = erc20_transfer_call(token_address=_USDC, recipient=_RECIPIENT, amount=1)
+    assert call.data == (
+        "0xa9059cbb"
+        "000000000000000000000000000000000000000000000000000000000000dead"
+        "0000000000000000000000000000000000000000000000000000000000000001"
+    )
+
+
+def test_erc1155_set_approval_for_all_true_known_vector() -> None:
+    call = erc1155_set_approval_for_all_call(
+        token_address=_CTF, operator=_NEG_RISK_ADAPTER, approved=True
+    )
+    assert call.data == (
+        "0xa22cb465"
+        "000000000000000000000000d91e80cf2e7be2e162c6513ced06f1dd0da35296"
+        "0000000000000000000000000000000000000000000000000000000000000001"
+    )
+
+
+def test_erc1155_set_approval_for_all_false_known_vector() -> None:
+    call = erc1155_set_approval_for_all_call(
+        token_address=_CTF, operator=_NEG_RISK_ADAPTER, approved=False
+    )
+    assert call.data == (
+        "0xa22cb465"
+        "000000000000000000000000d91e80cf2e7be2e162c6513ced06f1dd0da35296"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    )
+
+
+def test_split_position_known_vector() -> None:
+    call = split_position_call(
+        target=_CTF,
+        collateral=_USDC,
+        condition_id=_CONDITION_ID,
+        amount=1_000_000,
+    )
+    assert call.data == (
+        "0x72ce4275"
+        "0000000000000000000000002791bca1f2de4661ed88a30c99a7a9449aa84174"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "1111111111111111111111111111111111111111111111111111111111111111"
+        "00000000000000000000000000000000000000000000000000000000000000a0"
+        "00000000000000000000000000000000000000000000000000000000000f4240"
+        "0000000000000000000000000000000000000000000000000000000000000002"
+        "0000000000000000000000000000000000000000000000000000000000000001"
+        "0000000000000000000000000000000000000000000000000000000000000002"
+    )
+
+
+def test_merge_positions_known_vector() -> None:
+    call = merge_positions_call(
+        target=_CTF,
+        collateral=_USDC,
+        condition_id=_CONDITION_ID,
+        amount=1_000_000,
+    )
+    assert call.data == (
+        "0x9e7212ad"
+        "0000000000000000000000002791bca1f2de4661ed88a30c99a7a9449aa84174"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "1111111111111111111111111111111111111111111111111111111111111111"
+        "00000000000000000000000000000000000000000000000000000000000000a0"
+        "00000000000000000000000000000000000000000000000000000000000f4240"
+        "0000000000000000000000000000000000000000000000000000000000000002"
+        "0000000000000000000000000000000000000000000000000000000000000001"
+        "0000000000000000000000000000000000000000000000000000000000000002"
+    )
+
+
+def test_ctf_redeem_positions_known_vector() -> None:
+    call = ctf_redeem_positions_call(ctf=_CTF, collateral=_USDC, condition_id=_CONDITION_ID)
+    assert call.data == (
+        "0x01b7037c"
+        "0000000000000000000000002791bca1f2de4661ed88a30c99a7a9449aa84174"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "1111111111111111111111111111111111111111111111111111111111111111"
+        "0000000000000000000000000000000000000000000000000000000000000080"
+        "0000000000000000000000000000000000000000000000000000000000000002"
+        "0000000000000000000000000000000000000000000000000000000000000001"
+        "0000000000000000000000000000000000000000000000000000000000000002"
+    )

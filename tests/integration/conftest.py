@@ -1,0 +1,272 @@
+import asyncio
+import os
+from collections.abc import AsyncGenerator, Callable, Iterator
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+from _environment import (
+    INTEGRATION_ENVIRONMENT_CONFIG_ENV_VAR,
+    load_integration_environment,
+)
+from dotenv import load_dotenv
+
+from market_sdk import (
+    AsyncPublicClient,
+    AsyncSecureClient,
+    BuilderApiKey,
+    Environment,
+    Market,
+    PublicClient,
+    RelayerApiKey,
+)
+from market_sdk.models.types import TokenId
+
+_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+_METERED_ENV_VAR = "POLYMARKET_RUN_METERED_TESTS"
+_METERED_SKIP_REASON = f"set {_METERED_ENV_VAR}=1 to run metered integration tests"
+
+_PAGES_TO_SCAN = 5
+_TRADABLE_MARKET_PAGE_SIZE = 100
+
+
+def _load_dotenv() -> None:
+    load_dotenv(_DOTENV_PATH, override=False)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    metered_items = [item for item in items if "metered" in item.keywords]
+    if not metered_items:
+        return
+
+    _load_dotenv()
+    if os.environ.get(_METERED_ENV_VAR) == "1":
+        return
+
+    skip_metered = pytest.mark.skip(reason=_METERED_SKIP_REASON)
+    for item in metered_items:
+        item.add_marker(skip_metered)
+
+
+@pytest.fixture
+def require_env() -> Callable[[str], str]:
+    _load_dotenv()
+
+    def get(name: str) -> str:
+        value = os.environ.get(name)
+        if not value:
+            pytest.skip(f"{name} is required for this integration test")
+        return value
+
+    return get
+
+
+@pytest.fixture
+def data_reference_wallet() -> str:
+    """Public wallet with portfolio, trade, and combo history for read-only tests."""
+    return "0x7c3db723f1d4d8cb9c550095203b686cb11e5c6b"
+
+
+@pytest.fixture
+def data_lost_positions_wallet() -> str:
+    """Public wallet holding lost positions as of 2026-09-24, shared with TS coverage."""
+    return "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+
+
+@pytest.fixture
+def data_empty_wallet() -> str:
+    """Public address used to check absent wallet statistics."""
+    return "0x00000000000000000000000000000000000000aa"
+
+
+@pytest.fixture
+def combo_leg_position_ids() -> list[str] | None:
+    _load_dotenv()
+    value = os.environ.get("POLYMARKET_COMBO_LEG_POSITION_IDS")
+    if value is None:
+        return None
+    legs = [leg.strip() for leg in value.split(",") if leg.strip()]
+    return legs if len(legs) >= 2 else None
+
+
+@pytest.fixture
+def builder_code(require_env: Callable[[str], str]) -> str:
+    return require_env("POLYMARKET_BUILDER_CODE")
+
+
+@pytest.fixture
+def builder_api_key(require_env: Callable[[str], str]) -> BuilderApiKey:
+    return BuilderApiKey(
+        key=require_env("POLYMARKET_BUILDER_API_KEY"),
+        secret=require_env("POLYMARKET_BUILDER_SECRET"),
+        passphrase=require_env("POLYMARKET_BUILDER_PASSPHRASE"),
+    )
+
+
+@pytest.fixture
+def relayer_api_key(require_env: Callable[[str], str]) -> RelayerApiKey:
+    return RelayerApiKey(
+        key=require_env("POLYMARKET_RELAYER_API_KEY"),
+        address=require_env("POLYMARKET_RELAYER_API_KEY_ADDRESS"),
+    )
+
+
+@pytest.fixture
+def deposit_wallet_private_key(require_env: Callable[[str], str]) -> str:
+    return require_env("POLYMARKET_PRIVATE_KEY")
+
+
+@pytest.fixture
+def deposit_wallet_address(require_env: Callable[[str], str]) -> str:
+    return require_env("POLYMARKET_DEPOSIT_WALLET")
+
+
+@pytest.fixture
+def proxy_wallet_private_key(require_env: Callable[[str], str]) -> str:
+    return require_env("POLYMARKET_PROXY_PRIVATE_KEY")
+
+
+@pytest.fixture
+def proxy_wallet_address(require_env: Callable[[str], str]) -> str:
+    return require_env("POLYMARKET_PROXY_WALLET")
+
+
+@pytest.fixture
+def safe_wallet_private_key(require_env: Callable[[str], str]) -> str:
+    return require_env("POLYMARKET_SAFE_PRIVATE_KEY")
+
+
+@pytest.fixture
+def safe_wallet_address(require_env: Callable[[str], str]) -> str:
+    return require_env("POLYMARKET_SAFE_WALLET")
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.fixture(scope="session")
+def integration_environment() -> Environment:
+    _load_dotenv()
+    try:
+        return load_integration_environment(os.environ.get(INTEGRATION_ENVIRONMENT_CONFIG_ENV_VAR))
+    except ValueError as error:
+        raise pytest.UsageError(
+            f"Invalid {INTEGRATION_ENVIRONMENT_CONFIG_ENV_VAR}: {error}"
+        ) from error
+
+
+@pytest.fixture
+async def deposit_wallet_client(
+    deposit_wallet_private_key: str,
+    deposit_wallet_address: str,
+    relayer_api_key: RelayerApiKey,
+    integration_environment: Environment,
+) -> AsyncGenerator[AsyncSecureClient, None]:
+    client = await AsyncSecureClient.create(
+        private_key=deposit_wallet_private_key,
+        wallet=deposit_wallet_address,
+        api_key=relayer_api_key,
+        environment=integration_environment,
+    )
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+@pytest.fixture
+async def public_client(
+    integration_environment: Environment,
+) -> AsyncGenerator[AsyncPublicClient, None]:
+    async with AsyncPublicClient(environment=integration_environment) as client:
+        yield client
+
+
+@pytest.fixture(scope="session")
+def sync_public_client(integration_environment: Environment) -> Iterator[PublicClient]:
+    with PublicClient(environment=integration_environment) as client:
+        yield client
+
+
+@pytest.fixture(scope="session")
+def active_clob_token(integration_environment: Environment) -> TokenId:
+    async def find() -> TokenId:
+        async with AsyncPublicClient(environment=integration_environment) as client:
+            paginator = client.list_markets(closed=False, page_size=20)
+            pages_seen = 0
+            async for page in paginator:
+                pages_seen += 1
+                for market in page.items:
+                    if not market.state.enable_order_book:
+                        continue
+                    if not market.state.accepting_orders:
+                        continue
+                    token_id = market.outcomes.yes.token_id
+                    if token_id is None:
+                        continue
+                    return token_id
+                if pages_seen >= _PAGES_TO_SCAN:
+                    break
+        pytest.skip("no CLOB-active market with a Yes-outcome token id found")
+
+    return asyncio.run(find())
+
+
+@pytest.fixture(scope="session")
+def tradable_market(integration_environment: Environment) -> Market:
+    async def find() -> Market:
+        async with AsyncPublicClient(environment=integration_environment) as client:
+            paginator = client.list_markets(
+                ascending=False,
+                closed=False,
+                liquidity_num_min=1000,
+                order="liquidityNum",
+                sports_market_types=("moneyline", "spreads", "totals"),
+                page_size=_TRADABLE_MARKET_PAGE_SIZE,
+            )
+            pages_seen = 0
+            async for page in paginator:
+                pages_seen += 1
+                for market in page.items:
+                    if not _has_required_trading_fields(market):
+                        continue
+                    if not _has_tradable_prices(market):
+                        continue
+                    if not _has_clob_liquidity(market):
+                        continue
+                    return market
+                if pages_seen >= _PAGES_TO_SCAN:
+                    break
+        pytest.skip("no tradable market found")
+
+    return asyncio.run(find())
+
+
+def _has_required_trading_fields(market: Market) -> bool:
+    return (
+        market.condition_id is not None
+        and market.state.enable_order_book is True
+        and market.state.accepting_orders is True
+        and market.trading.minimum_order_size is not None
+        and market.trading.minimum_tick_size is not None
+        and (market.trading.seconds_delay or 0) == 0
+        and market.outcomes.yes.token_id is not None
+    )
+
+
+def _has_tradable_prices(market: Market) -> bool:
+    return (
+        market.prices.best_ask is not None
+        and market.prices.best_ask < Decimal(1)
+        and market.trading.minimum_tick_size is not None
+        and market.prices.best_ask > market.trading.minimum_tick_size
+        and market.prices.best_bid is not None
+        and market.prices.best_bid > Decimal(0)
+    )
+
+
+def _has_clob_liquidity(market: Market) -> bool:
+    liquidity = market.metrics.liquidity_clob or market.metrics.liquidity_num or Decimal(0)
+    return liquidity > Decimal(0)

@@ -1,0 +1,36 @@
+name: General feedback or question
+description: Ask a usage question or share feedback that is not clearly a bug or feature request.
+title: "[Feedback]: "
+labels:
+  - feedback
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for Python SDK questions, launch feedback, and reports that are not yet actionable as a bug or feature request.
+
+        Please do not report security vulnerabilities in public issues.
+  - type: textarea
+    id: question-feedback
+    attributes:
+      label: Question or feedback
+      description: Describe what you are trying to understand, share, or clarify.
+    validations:
+      required: true
+  - type: input
+    id: package-version
+    attributes:
+      label: SDK package and version
+      description: Include this if your question depends on a specific package version.
+      placeholder: "market-sdk==0.13.0"
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add a code sample, runtime details, link, or context if helpful.
+      render: python
+    validations:
+      required: false

@@ -1,0 +1,28 @@
+# Local backend contract review
+
+This review compares this SDK with local `clob` commit `a63ec4e0e9065faadb497d78621191c8f2f3bd65`, `relayer` commit `35b335aa2154db73336c12d5cff635a722c514ae`, `py-clob-client` commit `08f908211ff31bcab9e50088c827502678099d97`, and migration rules commit `9ac0b109e97c1de70c86b509ccf8dc3bb40fb891`. Service checkouts were read only. All contract tests use local mock transports; no authenticated live request or transaction was sent.
+
+| Flow | Current service contract | SDK handling and evidence |
+| --- | --- | --- |
+| CLOB auth | `clob/src/routes/auth.rs:23-41,232-286`: issue/derive with signed L1 headers; list is a plain string array; revoke returns `{revoked:true}`. | `_internal/actions/auth.py` parses these shapes; `test_auth_actions.py`, `test_auth_transport.py`, and `test_secure_api_keys_sync.py` check the client. |
+| Builder credentials | `relayer/src/routes/auth.rs:45-76,201-205,232-286`: POST `/auth/builder-api-key` uses L1 auth and returns `apiKey/secret/passphrase`; GET and DELETE use L2 auth, with DELETE returning `{revoked:true}`. | `clients/secure.py`, `clients/async_secure.py`, and `_internal/actions/auth.py` send these to the relayer. Listing with the alternate relayer API-key mode fails locally. `test_backend_auth_contract.py` checks method, host, headers, and envelopes. Builder and CLOB keys are distinct. |
+| Orders | `clob/src/routes/orders.rs:30-40,69-85` and `src/services/validation.rs:85-99`: POST `/order` or `/orders` (max 15), `owner` equals the CLOB API key, signature type 3, maker equals signer. `src/domain/eip712.rs:53-69` and `src/config.rs:156-157` define V2 typed data. | `_internal/actions/orders/post.py`, typed-data tests, and order unit tests cover payload and signing fields. HTTP `expiration` remains accepted by backend but is not in the V2 signed struct. No live order was posted. |
+| Relayer | `relayer/src/routes/relayer.rs:45-60,72-75,390-505,614-665`: GET `/nonce?address=…&type=WALLET` returns `{nonce}`; POST `/submit` accepts Deposit Wallet calls and returns `transactionID/state`; GET `/transaction?id=…` returns an array with `transactionID`, `transactionHash`, `state`, and optional `failureReason`. | `_internal/actions/relayer/*`, `test_relayer_nonce_contract.py`, and `test_relayer_submit_poll.py` cover these shapes. Builder HMAC headers use `KUEST_BUILDER_*`, matching `relayer/src/routes/middleware.rs:16-26`. Safe/Proxy submissions fail locally. |
+| Contracts and builder attribution | Migration rules `polymarket-to-kuest/AGENTS.md` fix Polygon 137, Circle USDC, the two CTF exchanges, and Deposit Wallet signing. `clob/src/routes/market_config.rs:1691-1705` accepts a bytes32 builder code. | `_internal/environment.py`, order typed-data tests, and `_internal/validation.py` use these values and encode a 20-byte builder address as bytes32. Four trading approvals target the two exchanges only. |
+| Builder trades | `clob/src/routes/builder.rs:84-108,373-475` has no `builder_code` query filter; its response also differs from the upstream builder-trade model. | Four public client methods raise `UserInputError` before requesting `/builder/trades`; `test_builder_trades.py` checks the guard. This operation needs backend support before it can be enabled. |
+
+The SDK defaults all hosts to `unconfigured.invalid`. Operator endpoints and Polygon RPC must be supplied explicitly. These offline checks validate request/response contracts against the local source snapshots, not deployed service state, credentials, wallet deployment, or real trading.
+
+## Position operations and deliberate exclusions
+
+| Operation | Contract evidence and SDK behavior |
+| --- | --- |
+| Standard CTF split / merge | `ConditionalTokens.sol:1404,1464` use the five-argument CTF ABI. Market `conditionId` and numeric CTF token IDs route to the deployed `conditional_tokens` address, with Circle USDC as collateral. Unit tests check target and calldata. |
+| NegRisk CTF split / merge | `NegRiskAdapter.sol:135,165` accepts the same five-argument CTF ABI. Calls route to the deployed `neg_risk_adapter`; the adapter wraps Circle USDC internally. |
+| Standard CTF redeem | `ConditionalTokens.sol:1517` accepts the four-argument CTF redeem ABI. The SDK calls Conditional Tokens directly. |
+| NegRisk CTF redeem | `NegRiskAdapter.sol:239` accepts `redeemPositions(bytes32,uint256[])`. The SDK reads two outcome balances from the adapter's `balanceOfBatch` proxy and passes `[YES, NO]` to that contract. |
+| Protocol V2 Router / combo legs / position ID | The upstream CombinatorialModule, PositionManager, and protocol V2 Router addresses are not verified deployments for this SDK. Explicit V2 markets, combo-leg split/merge, position-ID redeem, and batch merge by position IDs reject before signing or RPC. A numeric CTF token ID alone does **not** identify this protocol. Order EIP-712 version `2` is unrelated. |
+| Session keys | `DepositWallet.sol` has on-chain signer authorization, but the specialized upstream session-key API has no verified service counterpart. Fetch, authorize, and revoke reject locally before HTTP or signing in both languages. |
+| RFQ | The CLOB backend has ordinary RFQ routes. This SDK deliberately leaves RFQ disabled; upstream combo RFQ is also incompatible. These flows are not offered as supported integration paths. |
+
+CTF split requires a USDC allowance to Conditional Tokens or NegRiskAdapter. NegRisk merge/redeem requires `setApprovalForAll` on Conditional Tokens for NegRiskAdapter. The four exchange trading approvals above do not cover these position permissions. Tests encode and inspect calls offline; no transaction was broadcast.

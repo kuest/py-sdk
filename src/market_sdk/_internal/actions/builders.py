@@ -1,0 +1,69 @@
+from typing import cast
+
+from pydantic import TypeAdapter, ValidationError
+
+from market_sdk._internal.actions._cursor import (
+    next_cursor_or_none,
+    validate_cursor,
+)
+from market_sdk._internal.actions.exchange_asset import resolve_optional_asset_id
+from market_sdk._internal.request import QueryParamValue
+from market_sdk._internal.validation import require_nonempty, validate_builder_code
+from market_sdk.errors import UnexpectedResponseError
+from market_sdk.models.clob import BuilderTrade
+from market_sdk.pagination import Page
+
+_BuilderTradesAdapter = TypeAdapter(tuple[BuilderTrade, ...])
+
+
+def build_list_builder_trades_request(
+    *,
+    builder_code: str,
+    market: str | None = None,
+    asset_id: str | None = None,
+    token_id: str | None = None,
+    id: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    cursor: str | None = None,
+) -> tuple[str, dict[str, QueryParamValue]]:
+    params: dict[str, QueryParamValue] = {
+        "builder_code": validate_builder_code(builder_code),
+    }
+    if market is not None:
+        params["market"] = require_nonempty("market", market)
+    resolved_asset = resolve_optional_asset_id(asset_id=asset_id, token_id=token_id)
+    if resolved_asset is not None:
+        params["asset_id"] = resolved_asset
+    if id is not None:
+        params["id"] = require_nonempty("id", id)
+    if after is not None:
+        params["after"] = require_nonempty("after", after)
+    if before is not None:
+        params["before"] = require_nonempty("before", before)
+    validated_cursor = validate_cursor(cursor)
+    if validated_cursor is not None:
+        params["next_cursor"] = validated_cursor
+    return "/builder/trades", params
+
+
+def parse_builder_trades_page(data: object) -> Page[BuilderTrade]:
+    if not isinstance(data, dict):
+        raise UnexpectedResponseError("builder trades response did not match expected shape")
+    payload = cast(dict[str, object], data)
+    try:
+        items = _BuilderTradesAdapter.validate_python(payload.get("data"))
+    except ValidationError as error:
+        raise UnexpectedResponseError("builder trades response items malformed") from error
+    raw_next_cursor = payload.get("next_cursor")
+    if not isinstance(raw_next_cursor, str):
+        raise UnexpectedResponseError("builder trades response missing next_cursor")
+    next_cursor = next_cursor_or_none(raw_next_cursor)
+    return Page(
+        items=items,
+        has_more=next_cursor is not None,
+        next_cursor=next_cursor,
+    )
+
+
+__all__ = ["build_list_builder_trades_request", "parse_builder_trades_page"]
