@@ -9,7 +9,7 @@ This local package provides public reads, CLOB order workflows, and Deposit Wall
 - Position-backed V3 orders, combo RFQ, and protocol V2 collateral return are rejected before network requests.
 - `configured_environment` requires explicit HTTPS/WSS service endpoints and Polygon RPC. Defaults are unconfigured.
 
-The distribution is `market-sdk` and the import is `market_sdk`. Direct GitHub
+The distribution is `kuest-sdk` and the import is `market_sdk`. Direct GitHub
 checkouts require explicit endpoints. Operator ZIPs may add the existing
 `.sdk/site-config.json` overlay for builder attribution, geoblocking, order
 metadata, and site-scoped market discovery; presentation is set by the downloader.

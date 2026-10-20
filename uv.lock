@@ -1087,7 +1087,7 @@ wheels = [
 ]
 
 [[package]]
-name = "market-sdk"
+name = "kuest-sdk"
 version = "0.13.0"
 source = { editable = "." }
 dependencies = [

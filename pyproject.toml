@@ -3,7 +3,7 @@ requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = "market-sdk"
+name = "kuest-sdk"
 version = "0.13.0"
 description = "Unified prediction-market client for Polygon CLOB and Deposit Wallet workflows"
 readme = "README.md"
@@ -55,7 +55,7 @@ dev = [
   "python-dotenv>=1.2.2",
   # Frames extras — dev needs all of them to run the frames test suite.
   # Production users install only the extras they need via
-  # ``market-sdk[pandas|polars|arrow|quant]``.
+  # ``kuest-sdk[pandas|polars|arrow|quant]``.
   "pyarrow>=15,<22",
   "pandas>=2,<3",
   "polars>=1,<2",
