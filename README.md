@@ -25,8 +25,9 @@ For a direct GitHub checkout, supply endpoint configuration explicitly. An opera
 may include `.sdk/site-config.json` with the existing `site_url`, `builder_mode`,
 `geoblock`, `builder_code`, and `order_metadata` fields. That file supplies operator
 attribution and site checks without changing the public package name. It must contain
-no private keys. A configured builder code takes precedence over a per-order builder
-code; market discovery uses the configured site's active event list.
+no private keys. A nonempty configured builder code takes precedence over a per-order
+builder code, including the zero bytes32 value, which means no attribution.
+`builder_mode=true` requires a nonzero code. Market discovery uses the configured site's active event list.
 
 ## Read-only example
 

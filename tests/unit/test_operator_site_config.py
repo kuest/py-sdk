@@ -58,6 +58,17 @@ def test_overlay_uses_existing_schema_and_direct_checkout_defaults(
     assert site_config.get_site_order_context()["builder_code"] == parsed["builder_code"]
 
 
+def test_zero_builder_code_preserves_inherited_override_when_builder_mode_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(site_config.SITE_CONFIG, "builder_mode", False)
+    monkeypatch.setitem(site_config.SITE_CONFIG, "builder_code", site_config.ZERO_BYTES32)
+    assert site_config.get_site_order_context()["builder_code"] == site_config.ZERO_BYTES32
+    monkeypatch.setitem(site_config.SITE_CONFIG, "builder_mode", True)
+    with pytest.raises(ValueError, match="requires a non-zero builder_code"):
+        site_config.get_site_order_context()
+
+
 def test_geoblock_uses_operator_site_and_rejects_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
