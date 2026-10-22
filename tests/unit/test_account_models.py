@@ -92,7 +92,7 @@ def _clob_trade_payload(**overrides: object) -> dict[str, object]:
 def test_account_model_annotations_are_canonical() -> None:
     expected = {
         OpenOrder: {
-            "price": Decimal,
+            "price": Decimal | None,
             "original_size": Decimal,
             "size_matched": Decimal,
             "created_at": datetime,
@@ -125,7 +125,7 @@ def test_account_model_annotations_are_canonical() -> None:
 def test_account_model_signatures_use_canonical_annotations() -> None:
     expected = {
         OpenOrder: {
-            "price": Decimal,
+            "price": Decimal | None,
             "original_size": Decimal,
             "size_matched": Decimal,
             "created_at": datetime,
