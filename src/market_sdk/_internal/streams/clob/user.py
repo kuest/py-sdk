@@ -162,7 +162,7 @@ class ClobUserStreamManager:
         events, dropped = parse_user_events(raw)
         if dropped:
             self._dropped_events += dropped
-            self._logger.debug("dropped %d malformed user event(s)", dropped)
+            self._logger.warning("dropped %d malformed user event(s)", dropped)
         for event in events:
             self._registry.dispatch(event)
 

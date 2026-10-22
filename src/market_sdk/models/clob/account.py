@@ -45,6 +45,10 @@ def _empty_string_to_none(value: object) -> object:
     return None if value == "" else value
 
 
+def _normalize_order_side(value: object) -> object:
+    return value.upper() if isinstance(value, str) else value
+
+
 class OpenOrder(BaseModel):
     """Open order owned by an account."""
 
@@ -57,13 +61,13 @@ class OpenOrder(BaseModel):
         description="Condition ID for the market associated with this order.",
     )
     asset_id: ClobAssetId = Field(validation_alias=AliasChoices("asset_id", "token_id"))
-    owner: str
+    owner: str | None
     maker_address: str = Field(validation_alias="maker_address")
     side: OrderSide
-    price: Decimal
+    price: Decimal | None
     original_size: Decimal = Field(validation_alias="original_size")
     size_matched: Decimal = Field(validation_alias="size_matched")
-    outcome: str
+    outcome: str | None
     order_type: str = Field(validation_alias="order_type")
     status: str
     associate_trades: tuple[str, ...] = Field(default=(), validation_alias="associate_trades")
@@ -113,7 +117,7 @@ class MakerOrder(BaseModel):
     side: OrderSide
     price: Decimal
     matched_amount: Decimal = Field(validation_alias="matched_amount")
-    outcome: str
+    outcome: str | None
     fee_rate_bps: Decimal | None = Field(default=None, validation_alias="fee_rate_bps")
 
     @computed_field
@@ -128,6 +132,7 @@ class MakerOrder(BaseModel):
     )
 
     _empty_fee_rate_to_none = field_validator("fee_rate_bps", mode="before")(_empty_string_to_none)
+    _normalize_side = field_validator("side", mode="before")(_normalize_order_side)
 
 
 class ClobTrade(BaseModel):
@@ -146,10 +151,12 @@ class ClobTrade(BaseModel):
     maker_address: str = Field(validation_alias="maker_address")
     taker_order_id: str = Field(validation_alias="taker_order_id")
     side: OrderSide
-    trader_side: Literal["TAKER", "MAKER"] = Field(validation_alias="trader_side")
+    trader_side: Literal["TAKER", "MAKER"] = Field(
+        validation_alias=AliasChoices("type", "trader_side")
+    )
     price: Decimal
     size: Decimal
-    outcome: str
+    outcome: str | None
     status: TradeStatus
     fee_rate_bps: Decimal = Field(validation_alias="fee_rate_bps")
     bucket_index: int = Field(validation_alias="bucket_index")
@@ -173,6 +180,7 @@ class ClobTrade(BaseModel):
         parse_decimal_string
     )
     _validate_status = field_validator("status", mode="before")(_normalize_trade_status)
+    _normalize_side = field_validator("side", mode="before")(_normalize_order_side)
     _validate_timestamps = field_validator("matched_at", "updated_at", mode="before")(
         _require_epoch_or_iso_timestamp
     )
