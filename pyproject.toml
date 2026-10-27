@@ -32,7 +32,7 @@ dependencies = [
   "msgpack>=1,<2",
   "pydantic>=2,<3",
   "typing-extensions>=4.15,<5",
-  "websockets>=13,<16",
+  "websockets>=13,<18",
 ]
 
 [project.optional-dependencies]
