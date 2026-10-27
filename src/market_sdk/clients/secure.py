@@ -242,7 +242,7 @@ from market_sdk.site_config import (
     fetch_geoblock_status,
     get_site_order_context,
 )
-from market_sdk.site_scope import scope_market_paginator
+from market_sdk.site_creators import resolve_sync_creator, scope_sync_keyset
 from market_sdk.transactions import (
     MergePositionRequest,
     SyncDeprecatedTransactionHandle,
@@ -1067,15 +1067,30 @@ class SecureClient:
 
     @overload
     def get_market(
-        self, *, id: str, include_tag: bool | None = None, locale: str | None = None
+        self,
+        *,
+        id: str,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market: ...
     @overload
     def get_market(
-        self, *, slug: str, include_tag: bool | None = None, locale: str | None = None
+        self,
+        *,
+        slug: str,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market: ...
     @overload
     def get_market(
-        self, *, url: str, include_tag: bool | None = None, locale: str | None = None
+        self,
+        *,
+        url: str,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market: ...
     def get_market(
         self,
@@ -1085,8 +1100,13 @@ class SecureClient:
         url: str | None = None,
         include_tag: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market:
         """Get a market by id, slug, or SDK URL.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden.
 
         Markets that cannot be represented by the binary Market model raise
         UnexpectedResponseError.
@@ -1094,7 +1114,12 @@ class SecureClient:
         return sync_dispatch(
             self._ctx,
             _gamma_actions.get_market_spec(
-                id=id, slug=slug, url=url, include_tag=include_tag, locale=locale
+                id=id,
+                slug=slug,
+                url=url,
+                include_tag=include_tag,
+                locale=locale,
+                creator=resolve_sync_creator(creator),
             ),
         )
 
@@ -1111,6 +1136,7 @@ class SecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event: ...
     @overload
     def get_event(
@@ -1121,6 +1147,7 @@ class SecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event: ...
     @overload
     def get_event(
@@ -1131,6 +1158,7 @@ class SecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event: ...
     def get_event(
         self,
@@ -1142,8 +1170,13 @@ class SecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event:
-        """Get an event by id, slug, or SDK URL."""
+        """Get an event by id, slug, or SDK URL.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden."""
         return sync_dispatch(
             self._ctx,
             _gamma_actions.get_event_spec(
@@ -1154,6 +1187,7 @@ class SecureClient:
                 include_chat=include_chat,
                 include_template=include_template,
                 locale=locale,
+                creator=resolve_sync_creator(creator),
             ),
         )
 
@@ -1306,6 +1340,7 @@ class SecureClient:
         liquidity_min: float | None = None,
         live: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
         order: str | None = None,
         parent_event_id: int | None = None,
         partner_slug: str | None = None,
@@ -1326,6 +1361,10 @@ class SecureClient:
         page_size: int = 20,
     ) -> Paginator[Event]:
         """List events.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden.
 
         Defaults to open events. Pass ``closed=True`` to list settled events.
 
@@ -1354,6 +1393,7 @@ class SecureClient:
             liquidity_min=liquidity_min,
             live=live,
             locale=locale,
+            creator=creator,
             order=order,
             parent_event_id=parent_event_id,
             partner_slug=partner_slug,
@@ -1372,7 +1412,7 @@ class SecureClient:
             volume_max=volume_max,
             volume_min=volume_min,
         )
-        return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+        return scope_sync_keyset(self._ctx, spec, page_size=page_size)
 
     def list_markets(
         self,
@@ -1391,6 +1431,7 @@ class SecureClient:
         liquidity_num_max: float | None = None,
         liquidity_num_min: float | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
         market_maker_addresses: str | Sequence[str] | None = None,
         order: str | None = None,
         onchain_event_ids: str | Sequence[str] | None = None,
@@ -1419,6 +1460,10 @@ class SecureClient:
         page_size: int = 20,
     ) -> Paginator[Market]:
         """List markets.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden.
 
         Omitting ``version`` uses the current server default of CTF markets (v1).
         Pass one version or a sequence of one or two versions. Keep the same
@@ -1449,6 +1494,7 @@ class SecureClient:
             liquidity_num_max=liquidity_num_max,
             liquidity_num_min=liquidity_num_min,
             locale=locale,
+            creator=creator,
             market_maker_addresses=market_maker_addresses,
             order=order,
             onchain_event_ids=onchain_event_ids,
@@ -1470,7 +1516,7 @@ class SecureClient:
             volume_num_max=volume_num_max,
             volume_num_min=volume_num_min,
         )
-        return scope_market_paginator(sync_paginate_keyset(self._ctx, spec, page_size=page_size))
+        return scope_sync_keyset(self._ctx, spec, page_size=page_size)
 
     def list_combo_markets(
         self,

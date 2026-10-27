@@ -299,7 +299,7 @@ from market_sdk.site_config import (
     ensure_geoblock_allowed,
     get_site_order_context,
 )
-from market_sdk.site_scope import scope_async_market_paginator
+from market_sdk.site_creators import resolve_async_creator, scope_async_keyset
 from market_sdk.streams._specs import (
     CommentsSpec,
     CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
@@ -1691,15 +1691,30 @@ class AsyncSecureClient:
 
     @overload
     async def get_market(
-        self, *, id: str, include_tag: bool | None = None, locale: str | None = None
+        self,
+        *,
+        id: str,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market: ...
     @overload
     async def get_market(
-        self, *, slug: str, include_tag: bool | None = None, locale: str | None = None
+        self,
+        *,
+        slug: str,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market: ...
     @overload
     async def get_market(
-        self, *, url: str, include_tag: bool | None = None, locale: str | None = None
+        self,
+        *,
+        url: str,
+        include_tag: bool | None = None,
+        locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market: ...
     async def get_market(
         self,
@@ -1709,8 +1724,13 @@ class AsyncSecureClient:
         url: str | None = None,
         include_tag: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Market:
         """Get a market by id, slug, or SDK URL.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden.
 
         Markets that cannot be represented by the binary Market model raise
         UnexpectedResponseError.
@@ -1718,7 +1738,12 @@ class AsyncSecureClient:
         return await async_dispatch(
             self._ctx,
             _gamma_actions.get_market_spec(
-                id=id, slug=slug, url=url, include_tag=include_tag, locale=locale
+                id=id,
+                slug=slug,
+                url=url,
+                include_tag=include_tag,
+                locale=locale,
+                creator=await resolve_async_creator(creator),
             ),
         )
 
@@ -1735,6 +1760,7 @@ class AsyncSecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event: ...
     @overload
     async def get_event(
@@ -1745,6 +1771,7 @@ class AsyncSecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event: ...
     @overload
     async def get_event(
@@ -1755,6 +1782,7 @@ class AsyncSecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event: ...
     async def get_event(
         self,
@@ -1766,8 +1794,13 @@ class AsyncSecureClient:
         include_chat: bool | None = None,
         include_template: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
     ) -> Event:
-        """Get an event by id, slug, or SDK URL."""
+        """Get an event by id, slug, or SDK URL.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden."""
         return await async_dispatch(
             self._ctx,
             _gamma_actions.get_event_spec(
@@ -1778,6 +1811,7 @@ class AsyncSecureClient:
                 include_chat=include_chat,
                 include_template=include_template,
                 locale=locale,
+                creator=await resolve_async_creator(creator),
             ),
         )
 
@@ -1930,6 +1964,7 @@ class AsyncSecureClient:
         liquidity_min: float | None = None,
         live: bool | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
         order: str | None = None,
         parent_event_id: int | None = None,
         partner_slug: str | None = None,
@@ -1950,6 +1985,10 @@ class AsyncSecureClient:
         page_size: int = 20,
     ) -> AsyncPaginator[Event]:
         """List events.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden.
 
         Defaults to open events. Pass ``closed=True`` to list settled events.
 
@@ -1978,6 +2017,7 @@ class AsyncSecureClient:
             liquidity_min=liquidity_min,
             live=live,
             locale=locale,
+            creator=creator,
             order=order,
             parent_event_id=parent_event_id,
             partner_slug=partner_slug,
@@ -1996,7 +2036,7 @@ class AsyncSecureClient:
             volume_max=volume_max,
             volume_min=volume_min,
         )
-        return async_paginate_keyset(self._ctx, spec, page_size=page_size)
+        return scope_async_keyset(self._ctx, spec, page_size=page_size)
 
     def list_markets(
         self,
@@ -2015,6 +2055,7 @@ class AsyncSecureClient:
         liquidity_num_max: float | None = None,
         liquidity_num_min: float | None = None,
         locale: str | None = None,
+        creator: str | Sequence[str] | None = None,
         market_maker_addresses: str | Sequence[str] | None = None,
         order: str | None = None,
         onchain_event_ids: str | Sequence[str] | None = None,
@@ -2043,6 +2084,10 @@ class AsyncSecureClient:
         page_size: int = 20,
     ) -> AsyncPaginator[Market]:
         """List markets.
+
+        ``creator`` accepts a wallet, site URL, comma-separated string, or sequence.
+
+        A configured operator site filters these reads automatically and cannot be overridden.
 
         Omitting ``version`` uses the current server default of CTF markets (v1).
         Pass one version or a sequence of one or two versions. Keep the same
@@ -2073,6 +2118,7 @@ class AsyncSecureClient:
             liquidity_num_max=liquidity_num_max,
             liquidity_num_min=liquidity_num_min,
             locale=locale,
+            creator=creator,
             market_maker_addresses=market_maker_addresses,
             order=order,
             onchain_event_ids=onchain_event_ids,
@@ -2094,9 +2140,7 @@ class AsyncSecureClient:
             volume_num_max=volume_num_max,
             volume_num_min=volume_num_min,
         )
-        return scope_async_market_paginator(
-            async_paginate_keyset(self._ctx, spec, page_size=page_size)
-        )
+        return scope_async_keyset(self._ctx, spec, page_size=page_size)
 
     def list_combo_markets(
         self,

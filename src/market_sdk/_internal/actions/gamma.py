@@ -132,6 +132,25 @@ DateFilter: TypeAlias = str | date
 TimestampFilter: TypeAlias = str | datetime
 
 
+def _creator_query(creator: str | Sequence[str] | None) -> str | None:
+    if creator is None:
+        return None
+    if isinstance(creator, str):
+        values = creator.split(",")
+    elif isinstance(cast(object, creator), Sequence) and not isinstance(
+        cast(object, creator), bytes
+    ):
+        values = creator
+    else:
+        raise UserInputError("creator must be a wallet, site, or sequence of them")
+    if not values or any(not isinstance(cast(object, value), str) for value in values):
+        raise UserInputError("creator must contain non-empty wallets or sites")
+    parts = [part.strip() for value in values for part in value.split(",")]
+    if any(not part for part in parts):
+        raise UserInputError("creator must contain non-empty wallets or sites")
+    return ",".join(parts)
+
+
 def _coerce_date_filter(value: DateFilter | None) -> str | None:
     if value is None:
         return None
@@ -247,12 +266,17 @@ def get_market_spec(
     url: str | None,
     include_tag: bool | None,
     locale: str | None,
+    creator: str | Sequence[str] | None = None,
 ) -> RequestSpec[Market]:
+    params: dict[str, QueryParamValue | None] = {"include_tag": include_tag, "locale": locale}
+    creator_query = _creator_query(creator)
+    if creator_query is not None:
+        params["creator"] = creator_query
     return RequestSpec(
         service="gamma",
         method="GET",
         path=build_market_path(id=id, slug=slug, url=url),
-        params={"include_tag": include_tag, "locale": locale},
+        params=params,
         parse=Market.parse_response,
     )
 
@@ -275,17 +299,22 @@ def get_event_spec(
     include_chat: bool | None,
     include_template: bool | None,
     locale: str | None,
+    creator: str | Sequence[str] | None = None,
 ) -> RequestSpec[Event]:
+    params: dict[str, QueryParamValue | None] = {
+        "include_best_lines": include_best_lines,
+        "include_chat": include_chat,
+        "include_template": include_template,
+        "locale": locale,
+    }
+    creator_query = _creator_query(creator)
+    if creator_query is not None:
+        params["creator"] = creator_query
     return RequestSpec(
         service="gamma",
         method="GET",
         path=build_event_path(id=id, slug=slug, url=url),
-        params={
-            "include_best_lines": include_best_lines,
-            "include_chat": include_chat,
-            "include_template": include_template,
-            "locale": locale,
-        },
+        params=params,
         parse=Event.parse_response,
     )
 
@@ -463,6 +492,7 @@ def list_events_spec(
     liquidity_min: float | None = None,
     live: bool | None = None,
     locale: str | None = None,
+    creator: str | Sequence[str] | None = None,
     order: str | None = None,
     parent_event_id: int | None = None,
     partner_slug: str | None = None,
@@ -506,6 +536,7 @@ def list_events_spec(
     _add_optional(params, "liquidity_min", liquidity_min)
     _add_optional(params, "live", live)
     _add_optional(params, "locale", locale)
+    _add_optional(params, "creator", _creator_query(creator))
     _add_optional(params, "order", order)
     _add_optional(params, "parent_event_id", parent_event_id)
     _add_optional(params, "partner_slug", partner_slug)
@@ -548,6 +579,7 @@ def list_markets_spec(
     liquidity_num_max: float | None = None,
     liquidity_num_min: float | None = None,
     locale: str | None = None,
+    creator: str | Sequence[str] | None = None,
     market_maker_addresses: str | Sequence[str] | None = None,
     order: str | None = None,
     onchain_event_ids: str | Sequence[str] | None = None,
@@ -609,6 +641,7 @@ def list_markets_spec(
     _add_optional(params, "liquidity_num_max", liquidity_num_max)
     _add_optional(params, "liquidity_num_min", liquidity_num_min)
     _add_optional(params, "locale", locale)
+    _add_optional(params, "creator", _creator_query(creator))
     _add_optional_seq(params, "market_maker_address", market_maker_addresses)
     _add_optional(params, "order", _normalize_market_order(order))
     for key, value in (("onchain_event_ids", onchain_event_ids), ("request_ids", request_ids)):

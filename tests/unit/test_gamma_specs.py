@@ -233,3 +233,45 @@ def test_get_comment_thread_spec_omits_positions_flag() -> None:
 def test_get_comment_thread_spec_rejects_empty_id() -> None:
     with pytest.raises(UserInputError, match="id is required"):
         gamma_actions.get_comment_thread_spec("", get_positions=None)
+
+
+def test_creator_filter_uses_one_comma_separated_query_value() -> None:
+    wallets = ["0x" + "11" * 20, "0x" + "22" * 20]
+    expected = ",".join(wallets)
+
+    market = gamma_actions.get_market_spec(
+        id="42", slug=None, url=None, include_tag=None, locale=None, creator=wallets
+    )
+    event = gamma_actions.get_event_spec(
+        id=None,
+        slug="event-slug",
+        url=None,
+        include_best_lines=None,
+        include_chat=None,
+        include_template=None,
+        locale=None,
+        creator=wallets,
+    )
+    markets = gamma_actions.list_markets_spec(creator=wallets)
+    events = gamma_actions.list_events_spec(creator=expected)
+
+    assert market.params is not None and market.params["creator"] == expected
+    assert event.params is not None and event.params["creator"] == expected
+    assert markets.base_params is not None and markets.base_params["creator"] == expected
+    assert events.base_params is not None and events.base_params["creator"] == expected
+
+
+def test_creator_filter_accepts_site_url_and_rejects_empty_values() -> None:
+    spec = gamma_actions.get_market_spec(
+        id=None,
+        slug=None,
+        url="https://operator.example/event/market-slug",
+        include_tag=None,
+        locale=None,
+        creator="https://operator.example",
+    )
+    assert spec.params is not None and spec.params["creator"] == "https://operator.example"
+
+    for creator in ([], [""], "wallet,,wallet", ["wallet", ""]):
+        with pytest.raises(UserInputError, match="creator must contain non-empty"):
+            gamma_actions.list_events_spec(creator=creator)
