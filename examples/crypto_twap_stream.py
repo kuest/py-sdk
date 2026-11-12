@@ -1,40 +1,28 @@
-"""Stream 30-second and 60-second Chainlink TWAP prices.
-
-    uv run python -m examples.crypto_twap_stream
-
-No credentials required. Stop the stream with Ctrl-C.
-"""
+"""Stream public reference prices from explicitly configured operator endpoints."""
 
 import asyncio
+import os
 
-from market_sdk import AsyncPublicClient
-from market_sdk.streams import CryptoPricesChainlinkTwapSpec  # pyright: ignore[reportDeprecated]
+from market_sdk import AsyncPublicClient, configured_environment
+from market_sdk.streams import CryptoTwapPriceSpec
 
 
 async def main() -> None:
-    client = AsyncPublicClient()
-    try:
-        async with await client.subscribe(
-            [
-                CryptoPricesChainlinkTwapSpec(  # pyright: ignore[reportDeprecated]
-                    window_seconds=30,
-                    symbols=["btc/usd", "eth/usd"],
-                ),
-                CryptoPricesChainlinkTwapSpec(  # pyright: ignore[reportDeprecated]
-                    window_seconds=60,
-                    symbols=["btc/usd", "eth/usd"],
-                ),
-            ]
-        ) as stream:
-            async for event in stream:
-                print(
-                    f"{event.payload.symbol} "
-                    f"{event.payload.window_seconds}s "
-                    f"{event.payload.value} "
-                    f"(observed {event.payload.timestamp})"
-                )
-    finally:
-        await client.close()
+    environment = configured_environment(
+        clob_url=os.environ["SDK_CLOB_URL"],
+        clob_ws_url=os.environ["SDK_CLOB_WS_URL"],
+        relayer_url=os.environ["SDK_RELAYER_URL"],
+        gamma_url=os.environ["SDK_GAMMA_URL"],
+        data_url=os.environ["SDK_DATA_URL"],
+        rpc_url=os.environ["SDK_RPC_URL"],
+        realtime_ws_url=os.environ["SDK_LIVE_DATA_WS_URL"],
+    )
+    async with (
+        AsyncPublicClient(environment=environment) as client,
+        await client.subscribe(CryptoTwapPriceSpec(symbols=["btcusd"])) as prices,
+    ):
+        async for event in prices:
+            print(event)
 
 
 if __name__ == "__main__":

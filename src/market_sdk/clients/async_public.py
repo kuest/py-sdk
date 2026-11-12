@@ -123,11 +123,9 @@ from market_sdk.models.perps.position_snapshots import (
     PerpsPositionSnapshotFill,
     PerpsPositionSnapshots,
 )
+from market_sdk.models.price_events import PriceEvent
 from market_sdk.models.rtds_events import (
     CommentsEvent,
-    CryptoPricesChainlinkTwapEvent,
-    CryptoPricesEvent,
-    EquityPricesEvent,
     RtdsEvent,
 )
 from market_sdk.models.sports_events import SportsEvent
@@ -136,9 +134,6 @@ from market_sdk.pagination import AsyncPaginator, Page
 from market_sdk.site_creators import resolve_async_creator, scope_async_keyset
 from market_sdk.streams._specs import (
     CommentsSpec,
-    CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
-    CryptoPricesSpec,  # pyright: ignore[reportDeprecated]
-    EquityPricesSpec,  # pyright: ignore[reportDeprecated]
     MarketSpec,
     PerpsSpec,
     PriceSpec,
@@ -152,6 +147,7 @@ if TYPE_CHECKING:
 
     from market_sdk._internal.streams.clob.market import ClobMarketStreamManager
     from market_sdk._internal.streams.perps.market import PerpsMarketStreamManager
+    from market_sdk._internal.streams.realtime.manager import RealtimeStreamManager
     from market_sdk._internal.streams.rtds.manager import RtdsStreamManager
     from market_sdk._internal.streams.sports.manager import SportsStreamManager
 
@@ -570,6 +566,7 @@ class AsyncPublicClient:
         self._market_manager: ClobMarketStreamManager | None = None
         self._sports_manager: SportsStreamManager | None = None
         self._rtds_manager: RtdsStreamManager | None = None
+        self._realtime_manager: RealtimeStreamManager | None = None
         self._perps_manager: PerpsMarketStreamManager | None = None
         self._streams_logger = logger
 
@@ -579,29 +576,15 @@ class AsyncPublicClient:
         return self._ctx.environment
 
     @overload
+    async def subscribe(
+        self, specs: PriceSpec | Sequence[PriceSpec], /
+    ) -> SubscriptionHandle[PriceEvent]: ...
+    @overload
     async def subscribe(self, specs: MarketSpec, /) -> SubscriptionHandle[MarketEvent]: ...
     @overload
     async def subscribe(self, specs: SportsSpec, /) -> SubscriptionHandle[SportsEvent]: ...
     @overload
     async def subscribe(self, specs: CommentsSpec, /) -> SubscriptionHandle[CommentsEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: CryptoPricesSpec,  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesChainlinkTwapEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: EquityPricesSpec,  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[EquityPricesEvent]: ...
     @overload
     async def subscribe(self, specs: PerpsSpec, /) -> SubscriptionHandle[PerpsMarketEvent]: ...
     @overload
@@ -618,34 +601,18 @@ class AsyncPublicClient:
     ) -> SubscriptionHandle[CommentsEvent]: ...
     @overload
     async def subscribe(
-        self,
-        specs: Sequence[CryptoPricesSpec],  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: Sequence[CryptoPricesChainlinkTwapSpec],  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesChainlinkTwapEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: Sequence[EquityPricesSpec],  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[EquityPricesEvent]: ...
-    @overload
-    async def subscribe(
         self, specs: Sequence[PerpsSpec], /
     ) -> SubscriptionHandle[PerpsMarketEvent]: ...
     @overload
     async def subscribe(
         self, specs: Sequence[PublicSubscription], /
-    ) -> SubscriptionHandle[MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent]: ...
+    ) -> SubscriptionHandle[
+        MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent | PriceEvent
+    ]: ...
     async def subscribe(
         self,
         specs: PublicSubscription | Sequence[PublicSubscription],
-    ) -> SubscriptionHandle[MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent]:
+    ) -> SubscriptionHandle[MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent | PriceEvent]:
         """Subscribe to one or more public realtime streams.
 
         Pass a single subscription spec for one stream or a sequence of specs to
@@ -656,15 +623,15 @@ class AsyncPublicClient:
             when finished.
         """
         items = normalize_specs(specs)
-        if any(isinstance(cast(object, spec), PriceSpec) for spec in items):
-            raise UserInputError("Authenticated subscriptions require AsyncSecureClient")
         # AsyncSubscriptionHandle is invariant in T, so per-channel handles
         # can't widen to the union type at the type level. Cast at the
         # boundary — the underlying queue holds whatever was pushed into it.
         handles: list[AsyncSubscriptionHandle[Any]] = []
         try:
             for spec in items:
-                if isinstance(spec, MarketSpec):
+                if isinstance(spec, PriceSpec):
+                    handles.append(await self._get_realtime_manager().subscribe(spec))
+                elif isinstance(spec, MarketSpec):
                     handles.append(
                         await self._get_market_manager().subscribe(
                             token_ids=spec.token_ids,
@@ -677,10 +644,7 @@ class AsyncPublicClient:
                     handles.append(await self._get_perps_manager().subscribe(spec))
                 elif isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                     spec,
-                    CommentsSpec
-                    | CryptoPricesSpec  # pyright: ignore[reportDeprecated]
-                    | CryptoPricesChainlinkTwapSpec  # pyright: ignore[reportDeprecated]
-                    | EquityPricesSpec,  # pyright: ignore[reportDeprecated]
+                    CommentsSpec,
                 ):
                     handles.append(await self._get_rtds_manager().subscribe(spec))
                 else:
@@ -692,13 +656,17 @@ class AsyncPublicClient:
             raise
         if len(handles) == 1:
             return cast(
-                SubscriptionHandle[MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent],
+                SubscriptionHandle[
+                    MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent | PriceEvent
+                ],
                 handles[0],
             )
         from market_sdk._internal.streams.merged_handle import MergedSubscriptionHandle
 
         return cast(
-            SubscriptionHandle[MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent],
+            SubscriptionHandle[
+                MarketEvent | SportsEvent | RtdsEvent | PerpsMarketEvent | PriceEvent
+            ],
             MergedSubscriptionHandle(handles),
         )
 
@@ -711,6 +679,16 @@ class AsyncPublicClient:
                 logger=self._streams_logger,
             )
         return self._market_manager
+
+    def _get_realtime_manager(self) -> "RealtimeStreamManager":
+        if self._realtime_manager is None:
+            from market_sdk._internal.streams.realtime.manager import RealtimeStreamManager
+
+            self._realtime_manager = RealtimeStreamManager(
+                url=self._ctx.environment_config.realtime_ws_url,
+                headers=self._ctx.environment_config.realtime_ws_headers,
+            )
+        return self._realtime_manager
 
     def _get_rtds_manager(self) -> "RtdsStreamManager":
         if self._rtds_manager is None:
@@ -764,6 +742,8 @@ class AsyncPublicClient:
                     await self._sports_manager.close()
             finally:
                 try:
+                    if self._realtime_manager is not None:
+                        await self._realtime_manager.close()
                     if self._rtds_manager is not None:
                         await self._rtds_manager.close()
                 finally:
