@@ -58,6 +58,7 @@ class RealtimePriceUpdate(RealtimePricePoint):
 
     symbol: str
     source: PriceSource
+    market_status: object | None = None
     """Source that supplied this price."""
     received_at: datetime | None = None
     is_carried_forward: bool | None = None
@@ -70,6 +71,7 @@ class RealtimePriceSnapshot(BaseModel):
 
     symbol: str
     source: PriceSource
+    market_status: object | None = None
     """Source for this history, including when ``data`` is empty."""
     data: tuple[RealtimePricePoint, ...]
 
@@ -81,6 +83,7 @@ class RealtimeTwapUpdate(RealtimePricePoint):
 
     symbol: str
     source: PriceSource
+    market_status: object | None = None
     """Source that supplied this TWAP."""
     window_seconds: Literal[60] = 60
 

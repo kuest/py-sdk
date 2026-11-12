@@ -268,9 +268,6 @@ from market_sdk.models.price_events import (
 )
 from market_sdk.models.rtds_events import (
     CommentsEvent,
-    CryptoPricesChainlinkTwapEvent,
-    CryptoPricesEvent,
-    EquityPricesEvent,
     RtdsEvent,
 )
 from market_sdk.models.sports_events import SportsEvent
@@ -302,12 +299,9 @@ from market_sdk.site_config import (
 from market_sdk.site_creators import resolve_async_creator, scope_async_keyset
 from market_sdk.streams._specs import (
     CommentsSpec,
-    CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
     CryptoPriceSpec,
-    CryptoPricesSpec,  # pyright: ignore[reportDeprecated]
     CryptoTwapPriceSpec,
     EquityPriceSpec,
-    EquityPricesSpec,  # pyright: ignore[reportDeprecated]
     EquityTwapPriceSpec,
     MarketSpec,
     PerpsSpec,
@@ -1178,24 +1172,6 @@ class AsyncSecureClient:
     @overload
     async def subscribe(self, specs: CommentsSpec, /) -> SubscriptionHandle[CommentsEvent]: ...
     @overload
-    async def subscribe(
-        self,
-        specs: CryptoPricesSpec,  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesChainlinkTwapEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: EquityPricesSpec,  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[EquityPricesEvent]: ...
-    @overload
     async def subscribe(self, specs: PerpsSpec, /) -> SubscriptionHandle[PerpsMarketEvent]: ...
     @overload
     async def subscribe(self, specs: UserSpec, /) -> SubscriptionHandle[UserEvent]: ...
@@ -1211,24 +1187,6 @@ class AsyncSecureClient:
     async def subscribe(
         self, specs: Sequence[CommentsSpec], /
     ) -> SubscriptionHandle[CommentsEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: Sequence[CryptoPricesSpec],  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: Sequence[CryptoPricesChainlinkTwapSpec],  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[CryptoPricesChainlinkTwapEvent]: ...
-    @overload
-    async def subscribe(
-        self,
-        specs: Sequence[EquityPricesSpec],  # pyright: ignore[reportDeprecated]
-        /,
-    ) -> SubscriptionHandle[EquityPricesEvent]: ...
     @overload
     async def subscribe(
         self, specs: Sequence[PerpsSpec], /
@@ -1251,7 +1209,7 @@ class AsyncSecureClient:
 
         Pass a single subscription spec for one stream or a sequence of specs to
         receive events through one merged handle. Authenticated user stream specs
-        are supported only by secure clients.
+        are public and require explicit filters.
 
         ``CryptoPriceSpec``, ``CryptoTwapPriceSpec``, ``EquityPriceSpec`` and
         ``EquityTwapPriceSpec`` wait for server acceptance and deliver recent history
@@ -1295,10 +1253,7 @@ class AsyncSecureClient:
                     handles.append(await self._get_perps_manager().subscribe(spec))
                 elif isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                     spec,
-                    CommentsSpec
-                    | CryptoPricesSpec  # pyright: ignore[reportDeprecated]
-                    | CryptoPricesChainlinkTwapSpec  # pyright: ignore[reportDeprecated]
-                    | EquityPricesSpec,  # pyright: ignore[reportDeprecated]
+                    CommentsSpec,
                 ):
                     handles.append(await self._get_rtds_manager().subscribe(spec))
                 else:
@@ -1336,7 +1291,6 @@ class AsyncSecureClient:
             self._realtime_manager = RealtimeStreamManager(
                 url=self._ctx.environment_config.realtime_ws_url,
                 headers=self._ctx.environment_config.realtime_ws_headers,
-                credentials=self._ctx.credentials,
                 logger=self._streams_logger,
             )
         return self._realtime_manager

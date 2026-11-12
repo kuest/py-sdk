@@ -20,7 +20,7 @@ class RealtimeStreamManager:
         self,
         *,
         url: str,
-        credentials: ApiKeyCreds,
+        credentials: ApiKeyCreds | None = None,
         headers: Mapping[str, str] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:

@@ -138,9 +138,19 @@ def parse_price_event(message: object) -> PriceEvent | None:
                     timestamp=timestamp,
                     seq=seq,
                     dropped=dropped,
-                    payload=RealtimeTwapSnapshot(symbol=symbol, source=source, data=points),
+                    payload=RealtimeTwapSnapshot(
+                        symbol=symbol,
+                        source=source,
+                        data=points,
+                        market_status=payload.get("market_status"),
+                    ),
                 )
-            history = RealtimePriceSnapshot(symbol=symbol, source=source, data=points)
+            history = RealtimePriceSnapshot(
+                symbol=symbol,
+                source=source,
+                data=points,
+                market_status=payload.get("market_status"),
+            )
             if topic == "prices.crypto":
                 return CryptoPriceSnapshotEvent(
                     timestamp=timestamp, seq=seq, dropped=dropped, payload=history
@@ -160,7 +170,11 @@ def parse_price_event(message: object) -> PriceEvent | None:
                 seq=seq,
                 dropped=dropped,
                 payload=RealtimeTwapUpdate(
-                    symbol=symbol, source=source, timestamp=point.timestamp, value=point.value
+                    symbol=symbol,
+                    source=source,
+                    timestamp=point.timestamp,
+                    value=point.value,
+                    market_status=payload.get("market_status"),
                 ),
             )
         received_at = (
@@ -177,6 +191,7 @@ def parse_price_event(message: object) -> PriceEvent | None:
             timestamp=point.timestamp,
             value=point.value,
             received_at=received_at,
+            market_status=payload.get("market_status"),
             is_carried_forward=cast(bool | None, carried),
         )
         if topic == "prices.crypto":
@@ -215,11 +230,17 @@ def refresh_snapshot(previous: PriceEvent | None, event: PriceEvent) -> PriceEve
             seq=event.seq,
             dropped=event.dropped,
             payload=RealtimeTwapSnapshot(
-                symbol=event.payload.symbol, source=event.payload.source, data=points
+                symbol=event.payload.symbol,
+                source=event.payload.source,
+                data=points,
+                market_status=event.payload.market_status,
             ),
         )
     payload = RealtimePriceSnapshot(
-        symbol=event.payload.symbol, source=event.payload.source, data=points
+        symbol=event.payload.symbol,
+        source=event.payload.source,
+        data=points,
+        market_status=event.payload.market_status,
     )
     if event.topic == "prices.crypto":
         return CryptoPriceSnapshotEvent(

@@ -1,43 +1,28 @@
-"""Stream authenticated prices using the normal secure-client setup."""
+"""Stream public reference prices from explicitly configured operator endpoints."""
 
 import asyncio
+import os
 
-from examples.lib.env import require_env
-from market_sdk import AsyncSecureClient
-from market_sdk.streams import (
-    CryptoPriceSpec,
-    CryptoTwapPriceSpec,
-    EquityPriceSpec,
-    EquityTwapPriceSpec,
-)
+from market_sdk import AsyncPublicClient, configured_environment
+from market_sdk.streams import CryptoPriceSpec
 
 
 async def main() -> None:
-    client = await AsyncSecureClient.create(
-        private_key=require_env("SDK_PRIVATE_KEY"),
-        wallet=require_env("SDK_DEPOSIT_WALLET"),
+    environment = configured_environment(
+        clob_url=os.environ["SDK_CLOB_URL"],
+        clob_ws_url=os.environ["SDK_CLOB_WS_URL"],
+        relayer_url=os.environ["SDK_RELAYER_URL"],
+        gamma_url=os.environ["SDK_GAMMA_URL"],
+        data_url=os.environ["SDK_DATA_URL"],
+        rpc_url=os.environ["SDK_RPC_URL"],
+        realtime_ws_url=os.environ["SDK_LIVE_DATA_WS_URL"],
     )
     async with (
-        client,
-        await client.subscribe(
-            [
-                CryptoPriceSpec(symbols=["btcusd", "ethusd"]),
-                CryptoTwapPriceSpec(symbols=["btcusd"]),
-                # A provider preference may fall back; payload.source identifies it.
-                EquityPriceSpec(symbol="aapl", provider="chainlink"),
-                EquityTwapPriceSpec(symbol="usdjpy"),
-            ]
-        ) as prices,
+        AsyncPublicClient(environment=environment) as client,
+        await client.subscribe(CryptoPriceSpec(symbols=["btcusd"])) as prices,
     ):
-        count = 0
         async for event in prices:
-            if event.type == "subscribe":
-                print(event.topic, event.payload.symbol, event.payload.source, event.payload.data)
-            else:
-                print(event.topic, event.payload.symbol, event.payload.source, event.payload.value)
-            count += 1
-            if count == 20:
-                break
+            print(event)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias, TypeVar
 
-from typing_extensions import deprecated
-
 from market_sdk.errors import UserInputError
 from market_sdk.models.price_events import KnownPriceSource
 
@@ -34,9 +32,6 @@ CommentsEventType = Literal[
     "comment_created", "comment_removed", "reaction_created", "reaction_removed"
 ]
 ParentEntityType = Literal["Event", "Market"]
-CryptoPricesTopic = Literal["prices.crypto.binance", "prices.crypto.chainlink"]
-CryptoPricesChainlinkTwapWindowSeconds = Literal[30, 60]
-EquityPricesEventType = Literal["update", "subscribe"]
 PriceProviderInput: TypeAlias = (
     Literal["chainlink", "pyth"] | Literal[KnownPriceSource.CHAINLINK, KnownPriceSource.PYTH]
 )
@@ -51,23 +46,6 @@ def _normalize_price_provider(provider: PriceProviderInput | None) -> PriceProvi
         if provider == "pyth":
             return "pyth"
     raise UserInputError("provider must be 'chainlink' or 'pyth'")
-
-
-def _normalize_crypto_symbols(symbols: Sequence[str] | None) -> tuple[str, ...] | None:
-    if symbols is None:
-        return None
-    if isinstance(symbols, str | bytes):
-        raise UserInputError("symbols must be a sequence of symbols, not a single string")
-    normalized: list[str] = []
-    for symbol in symbols:
-        if not isinstance(symbol, str):
-            raise UserInputError(f"symbol must be a string, got {type(symbol).__name__}")
-        if not symbol:
-            raise UserInputError("symbol must be non-empty")
-        normalized.append(symbol)
-    if not normalized:
-        raise UserInputError("symbols must be non-empty when provided")
-    return tuple(normalized)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, init=False)
@@ -167,146 +145,6 @@ class CommentsSpec:
             raise UserInputError(
                 f"parent_entity_type must be 'Event' or 'Market', got {self.parent_entity_type!r}"
             )
-
-
-@deprecated("Use CryptoPriceSpec with AsyncSecureClient.", category=None)
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CryptoPricesSpec:
-    """Subscribe to realtime crypto price updates for a topic.
-
-    When ``symbols`` is omitted, the subscription receives all symbols for the
-    selected topic.
-
-    Deprecated: use ``CryptoPriceSpec`` with an ``AsyncSecureClient`` and
-    explicit canonical USD symbols such as ``btcusd``.
-
-    Examples:
-        Before::
-
-            CryptoPricesSpec(topic="prices.crypto.binance", symbols=["btcusdt"])
-            CryptoPricesSpec(topic="prices.crypto.chainlink", symbols=["btc/usd"])
-
-        After, using AsyncSecureClient::
-
-            CryptoPriceSpec(symbols=["btcusd"])
-
-    The replacement requires authentication and explicit symbols; omitting
-    symbols to receive every symbol is no longer supported.
-    Migrating Binance subscriptions changes the quote currency from USDT to USD
-    and the price source. Chainlink subscriptions also change price source.
-    Consumers that depend on a specific currency or source must assess these
-    changes before migrating. The replacement includes history snapshots as
-    well as live updates. Events use ``CryptoPriceEvent`` and the
-    ``prices.crypto`` topic. Branch on ``event.type``: ``subscribe`` carries
-    history in ``payload.data``, while ``update`` carries ``payload.value``.
-    Payload timestamps are UTC ``datetime`` values instead of epoch-millisecond
-    integers; prices remain ``Decimal`` values.
-    """
-
-    topic: CryptoPricesTopic
-    symbols: Sequence[str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.topic not in _CRYPTO_PRICES_TOPICS:
-            raise UserInputError(
-                f"topic must be one of {sorted(_CRYPTO_PRICES_TOPICS)}, got {self.topic!r}"
-            )
-        object.__setattr__(self, "symbols", _normalize_crypto_symbols(self.symbols))
-
-
-@deprecated("Use CryptoTwapPriceSpec with AsyncSecureClient.", category=None)
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CryptoPricesChainlinkTwapSpec:
-    """Subscribe to Chainlink TWAP price updates.
-
-    ``window_seconds`` selects the 30-second or 60-second averaging window.
-    Symbols are lowercase slash-delimited pairs such as ``btc/usd``. When
-    ``symbols`` is omitted, the subscription receives every symbol.
-
-    Deprecated: use ``CryptoTwapPriceSpec`` for a fixed 60-second USD TWAP
-    with an ``AsyncSecureClient`` and explicit canonical USD symbols such as
-    ``btcusd``. The replacement includes history snapshots and live updates.
-    There is no replacement for the 30-second averaging window.
-
-    Examples:
-        Before::
-
-            CryptoPricesChainlinkTwapSpec(window_seconds=60, symbols=["btc/usd"])
-
-        After, using AsyncSecureClient::
-
-            CryptoTwapPriceSpec(symbols=["btcusd"])
-
-    The replacement requires authentication and explicit symbols; omitting
-    symbols to receive every symbol is no longer supported. Events use
-    ``CryptoTwapPriceEvent`` and the ``prices.crypto.twap`` topic.
-    Branch on ``event.type``: ``subscribe`` carries
-    history in ``payload.data``, while ``update`` carries ``payload.value``.
-    Payload timestamps are UTC ``datetime`` values instead of epoch-millisecond
-    integers; prices remain ``Decimal`` values, with ``window_seconds=60``.
-    """
-
-    window_seconds: CryptoPricesChainlinkTwapWindowSeconds
-    symbols: Sequence[str] | None = None
-    topic: Literal["prices.crypto.chainlink.twap"] = field(
-        default="prices.crypto.chainlink.twap", init=False
-    )
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.window_seconds, bool)
-            or not isinstance(self.window_seconds, int)
-            or self.window_seconds not in _CRYPTO_PRICES_CHAINLINK_TWAP_WINDOWS
-        ):
-            raise UserInputError(f"window_seconds must be 30 or 60, got {self.window_seconds!r}")
-        object.__setattr__(self, "symbols", _normalize_crypto_symbols(self.symbols))
-
-
-@deprecated("Use EquityPriceSpec with AsyncSecureClient.", category=None)
-@dataclass(frozen=True, slots=True, kw_only=True)
-class EquityPricesSpec:
-    """Subscribe to realtime equity price updates for one symbol.
-
-    Deprecated: use ``EquityPriceSpec`` with an ``AsyncSecureClient``.
-
-    Examples:
-        Before::
-
-            EquityPricesSpec(symbol="aapl", types=["update"])
-
-        After, using AsyncSecureClient::
-
-            EquityPriceSpec(symbol="aapl", types=["update"])
-
-    The replacement requires authentication and trims and lowercases symbols.
-    ``types`` still selects ``subscribe`` snapshots and/or ``update`` events;
-    omit it to receive both. The replacement also accepts an empty ``types``
-    sequence to receive both, which the legacy spec rejects.
-    Events use ``EquityPriceEvent`` and the ``prices.equity`` topic instead of
-    ``EquityPricesEvent`` and ``prices.equity.pyth``. Snapshots still carry
-    ``payload.data`` and updates still carry ``payload.value``. Payload
-    timestamps and optional ``received_at`` are UTC ``datetime`` values instead
-    of epoch-millisecond integers; prices remain ``Decimal`` values.
-    """
-
-    symbol: str
-    types: Sequence[EquityPricesEventType] | None = None
-    topic: Literal["prices.equity.pyth"] = field(default="prices.equity.pyth", init=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.symbol, str) or not self.symbol:
-            raise UserInputError("symbol must be a non-empty string")
-        if self.types is not None:
-            if isinstance(self.types, str | bytes):
-                raise UserInputError("types must be a sequence, not a single string")
-            normalized: list[EquityPricesEventType] = []
-            for t in self.types:
-                if not isinstance(t, str) or t not in _EQUITY_EVENT_TYPES:
-                    raise UserInputError(f"invalid equity event type: {t!r}")
-                normalized.append(t)  # type: ignore[arg-type]
-            if not normalized:
-                raise UserInputError("types must be non-empty when provided")
-            object.__setattr__(self, "types", tuple(normalized))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -463,7 +301,7 @@ def _normalize_equity_symbol(symbol: str) -> str:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CryptoPriceSpec:
-    """Subscribe to authenticated USD crypto prices and recent history.
+    """Subscribe to public USD crypto prices and recent history.
 
     Use explicit canonical lowercase symbols such as ``btcusd`` and ``ethusd``.
     Requires ``AsyncSecureClient``; subscription waits for server acceptance.
@@ -481,7 +319,7 @@ class CryptoPriceSpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CryptoTwapPriceSpec:
-    """Subscribe to authenticated 60-second USD crypto TWAPs and recent history.
+    """Subscribe to public 60-second USD crypto TWAPs and recent history.
 
     Use explicit canonical lowercase USD pairs such as ``btcusd``.
     The averaging window is fixed at 60 seconds. Requires ``AsyncSecureClient``.
@@ -499,7 +337,7 @@ class CryptoTwapPriceSpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EquityPriceSpec:
-    """Subscribe to authenticated prices for one symbol, such as ``aapl`` or ``usdjpy``.
+    """Subscribe to public prices for one symbol, such as ``aapl`` or ``usdjpy``.
 
     Prices use the instrument's quote currency: ``usdjpy`` is JPY per USD and
     ``usdcad`` is CAD per USD.
@@ -508,7 +346,7 @@ class EquityPriceSpec:
     """
 
     symbol: str
-    types: Sequence[EquityPricesEventType] | None = None
+    types: Sequence[Literal["update", "subscribe"]] | None = None
     provider: PriceProviderInput | None = None
     """Optional provider preference. Check payload ``source`` for the actual source."""
     topic: Literal["prices.equity"] = field(default="prices.equity", init=False)
@@ -528,7 +366,7 @@ class EquityPriceSpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EquityTwapPriceSpec:
-    """Subscribe to authenticated 60-second TWAPs for one symbol and recent history.
+    """Subscribe to public 60-second TWAPs for one symbol and recent history.
 
     Prices use the instrument's quote currency: ``usdjpy`` is JPY per USD.
     Symbols are trimmed and lowercased. The averaging window is fixed at 60 seconds.
@@ -546,7 +384,7 @@ class EquityTwapPriceSpec:
 
 
 PriceSpec = CryptoPriceSpec | CryptoTwapPriceSpec | EquityPriceSpec | EquityTwapPriceSpec
-RtdsSpec = CommentsSpec | CryptoPricesSpec | CryptoPricesChainlinkTwapSpec | EquityPricesSpec  # pyright: ignore[reportDeprecated]
+RtdsSpec = CommentsSpec
 PerpsSpec = (
     PerpsTradesSpec
     | PerpsBboSpec
@@ -555,7 +393,7 @@ PerpsSpec = (
     | PerpsTickersSpec
     | PerpsStatisticsSpec
 )
-PublicSubscription = MarketSpec | SportsSpec | RtdsSpec | PerpsSpec
+PublicSubscription = MarketSpec | SportsSpec | RtdsSpec | PerpsSpec | PriceSpec
 SecureSubscription = PublicSubscription | UserSpec | PriceSpec
 Subscription = SecureSubscription
 
@@ -568,9 +406,6 @@ _SPEC_TYPES: tuple[type[Subscription], ...] = (
     MarketSpec,
     SportsSpec,
     CommentsSpec,
-    CryptoPricesSpec,  # pyright: ignore[reportDeprecated]
-    CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
-    EquityPricesSpec,  # pyright: ignore[reportDeprecated]
     PerpsTradesSpec,
     PerpsBboSpec,
     PerpsBookSpec,
@@ -610,12 +445,6 @@ __all__ = [
     "SecureSubscription",
     "CommentsEventType",
     "CommentsSpec",
-    "CryptoPricesChainlinkTwapSpec",
-    "CryptoPricesChainlinkTwapWindowSeconds",
-    "CryptoPricesSpec",
-    "CryptoPricesTopic",
-    "EquityPricesEventType",
-    "EquityPricesSpec",
     "MarketSpec",
     "ParentEntityType",
     "PerpsBboSpec",
