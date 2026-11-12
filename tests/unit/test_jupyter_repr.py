@@ -89,7 +89,6 @@ def _make_position(**overrides: object) -> Position:
 
 _OPEN_ORDER_PAYLOAD: dict[str, Any] = {
     "asset_id": "8501497",
-    "associate_trades": ["trade-1"],
     "created_at": 1700000000000,
     "expiration": 1800000000,
     "id": "order-abcdef0123456789",
