@@ -20,7 +20,6 @@ FAKE_CREDS = ApiKeyCreds(key="test-key", passphrase="test-passphrase", secret="d
 
 _OPEN_ORDER_PAYLOAD: dict[str, Any] = {
     "asset_id": "8501497",
-    "associate_trades": ["trade-1"],
     "created_at": 1700000000000,
     "expiration": 1800000000,
     "id": "order-1",
@@ -158,7 +157,9 @@ def test_list_open_orders_paginates_until_end_cursor() -> None:
         try:
             _install_secure_clob(client, httpx.MockTransport(handler))
             ids: list[str] = []
-            async for order in client.list_open_orders(market="0xMARKET").iter_items():
+            async for order in client.list_open_orders(
+                asset_id="8501497", market="0xMARKET"
+            ).iter_items():
                 ids.append(order.id)
             return ids
         finally:
@@ -170,8 +171,11 @@ def test_list_open_orders_paginates_until_end_cursor() -> None:
     assert urlparse(str(captured[0].url)).path == "/data/orders"
     first_qs = parse_qs(urlparse(str(captured[0].url)).query)
     assert first_qs.get("market") == ["0xMARKET"]
+    assert first_qs.get("asset_id") == ["8501497"]
     assert "next_cursor" not in first_qs
     second_qs = parse_qs(urlparse(str(captured[1].url)).query)
+    assert second_qs.get("market") == ["0xMARKET"]
+    assert second_qs.get("asset_id") == ["8501497"]
     assert second_qs.get("next_cursor") == ["cursor-2"]
 
 

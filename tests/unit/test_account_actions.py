@@ -31,7 +31,6 @@ from market_sdk.models import (
 
 _OPEN_ORDER_PAYLOAD: dict[str, Any] = {
     "asset_id": "8501497",
-    "associate_trades": ["trade-1"],
     "created_at": 1700000000000,
     "expiration": 1800000000,
     "id": "order-1",
@@ -119,6 +118,27 @@ def test_build_list_open_orders_request_omits_unset_params() -> None:
     path, params = build_list_open_orders_request()
     assert path == "/data/orders"
     assert params == {}
+
+
+@pytest.mark.parametrize("asset_filter", [{"asset_id": "t1"}, {"token_id": "t1"}])
+def test_open_orders_asset_filter_requires_market(asset_filter: dict[str, str]) -> None:
+    with pytest.raises(UserInputError, match="market is required"):
+        build_list_open_orders_request(**asset_filter)
+
+    path, params = build_list_open_orders_request(**asset_filter, market="0xMARKET")
+    assert path == "/data/orders"
+    assert params == {"asset_id": "t1", "market": "0xMARKET"}
+
+
+@pytest.mark.parametrize("market", ["", None])
+def test_open_orders_asset_filter_rejects_empty_market(market: str | None) -> None:
+    with pytest.raises(UserInputError, match="market is required"):
+        build_list_open_orders_request(asset_id="t1", market=market)
+
+
+def test_open_orders_without_asset_does_not_require_market() -> None:
+    _, params = build_list_open_orders_request(id="order-1", cursor="next")
+    assert params == {"id": "order-1", "next_cursor": "next"}
 
 
 def test_parse_open_orders_page_decodes_end_cursor_as_none() -> None:
