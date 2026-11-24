@@ -146,6 +146,7 @@ from market_sdk.models import (
     LastTradePrice,
     LastTradePriceForAsset,
     Market,
+    MarketClarification,
     MarketResolutionStatus,
     Notification,
     OpenOrder,
@@ -242,7 +243,7 @@ from market_sdk.site_config import (
     fetch_geoblock_status,
     get_site_order_context,
 )
-from market_sdk.site_creators import resolve_sync_creator, scope_sync_keyset
+from market_sdk.site_creators import resolve_sync_creator, scope_sync_keyset, scope_sync_offset
 from market_sdk.transactions import (
     MergePositionRequest,
     SyncDeprecatedTransactionHandle,
@@ -1531,6 +1532,39 @@ class SecureClient:
         """
         spec = _rfq_actions.list_combo_markets_spec(exclude=exclude)
         return sync_paginate_keyset(self._ctx, spec, page_size=page_size)
+
+    def list_market_clarifications(
+        self,
+        *,
+        market_ids: str | int | Sequence[str | int] | None = None,
+        event_ids: str | int | Sequence[str | int] | None = None,
+        question_ids: str | Sequence[str] | None = None,
+        tx_hash: str | Sequence[str] | None = None,
+        state: str | Sequence[str] | None = None,
+        show_in_frontend: bool | None = None,
+        creator: str | Sequence[str] | None = None,
+        order: str | None = None,
+        ascending: bool | None = None,
+        page_size: int = 20,
+    ) -> Paginator[MarketClarification]:
+        """List published notes that explain how a market settles.
+
+        Filter by market, event, question, or transaction hash. Market IDs
+        may be numeric IDs or condition IDs. Only published, visible notes
+        are returned, and page size is capped at 100.
+        """
+        spec = _gamma_actions.list_market_clarifications_spec(
+            market_ids=market_ids,
+            event_ids=event_ids,
+            question_ids=question_ids,
+            tx_hash=tx_hash,
+            state=state,
+            show_in_frontend=show_in_frontend,
+            creator=creator,
+            order=order,
+            ascending=ascending,
+        )
+        return scope_sync_offset(self._ctx, spec, page_size=page_size)
 
     def list_series(
         self,

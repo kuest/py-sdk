@@ -14,8 +14,13 @@ from urllib.parse import urlparse
 import httpx
 
 from market_sdk._internal.context import AsyncClientContext, SyncClientContext
-from market_sdk._internal.dispatch import async_paginate_keyset, sync_paginate_keyset
-from market_sdk._internal.request import KeysetPaginatedSpec
+from market_sdk._internal.dispatch import (
+    async_paginate_keyset,
+    async_paginate_offset,
+    sync_paginate_keyset,
+    sync_paginate_offset,
+)
+from market_sdk._internal.request import KeysetPaginatedSpec, OffsetPaginatedSpec
 from market_sdk.errors import TransportError, UnexpectedResponseError, UserInputError
 from market_sdk.pagination import AsyncPaginator, Page, Paginator
 from market_sdk.site_config import SITE_CONFIG
@@ -170,6 +175,44 @@ def scope_async_keyset(
         query = await async_get_site_creator_query(site_url)
         scoped = replace(spec, base_params={**(spec.base_params or {}), "creator": query})
         paginator = async_paginate_keyset(ctx, scoped, page_size=page_size)
+        return await (paginator if cursor is None else paginator.from_cursor(cursor)).first_page()
+
+    return AsyncPaginator(fetch)
+
+
+def scope_sync_offset(
+    ctx: SyncClientContext, spec: OffsetPaginatedSpec[_T], *, page_size: int
+) -> Paginator[_T]:
+    site_url = SITE_CONFIG["site_url"].strip()
+    paginator = sync_paginate_offset(ctx, spec, page_size=page_size)
+    if not site_url:
+        return paginator
+    if spec.base_params and "creator" in spec.base_params:
+        raise UserInputError("creator cannot override a configured operator site")
+
+    def fetch(cursor: str | None) -> Page[_T]:
+        query = get_site_creator_query(site_url)
+        scoped = replace(spec, base_params={**(spec.base_params or {}), "creator": query})
+        paginator = sync_paginate_offset(ctx, scoped, page_size=page_size)
+        return (paginator if cursor is None else paginator.from_cursor(cursor)).first_page()
+
+    return Paginator(fetch)
+
+
+def scope_async_offset(
+    ctx: AsyncClientContext, spec: OffsetPaginatedSpec[_T], *, page_size: int
+) -> AsyncPaginator[_T]:
+    site_url = SITE_CONFIG["site_url"].strip()
+    paginator = async_paginate_offset(ctx, spec, page_size=page_size)
+    if not site_url:
+        return paginator
+    if spec.base_params and "creator" in spec.base_params:
+        raise UserInputError("creator cannot override a configured operator site")
+
+    async def fetch(cursor: str | None) -> Page[_T]:
+        query = await async_get_site_creator_query(site_url)
+        scoped = replace(spec, base_params={**(spec.base_params or {}), "creator": query})
+        paginator = async_paginate_offset(ctx, scoped, page_size=page_size)
         return await (paginator if cursor is None else paginator.from_cursor(cursor)).first_page()
 
     return AsyncPaginator(fetch)
