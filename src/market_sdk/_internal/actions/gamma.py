@@ -28,6 +28,7 @@ from market_sdk.models import (
     Comment,
     Event,
     Market,
+    MarketClarification,
     MarketResolutionStatus,
     ProtocolVersion,
     PublicProfile,
@@ -199,7 +200,7 @@ def _normalize_market_order(order: str | None) -> str | None:
 def _add_optional_seq(
     params: dict[str, QueryParamValue],
     key: str,
-    value: str | int | Sequence[str] | Sequence[int] | None,
+    value: str | int | Sequence[str | int] | None,
 ) -> None:
     if value is None:
         return
@@ -461,6 +462,7 @@ __all__ = [
     "list_comments_keyset_spec",
     "list_comments_spec",
     "list_events_spec",
+    "list_market_clarifications_spec",
     "list_markets_spec",
     "list_series_spec",
     "list_tags_spec",
@@ -678,6 +680,42 @@ def list_markets_spec(
         path="/markets/keyset",
         parse_page=_make_keyset_parser("markets", _parse_list_market),
         base_params=params or None,
+    )
+
+
+def list_market_clarifications_spec(
+    *,
+    market_ids: str | int | Sequence[str | int] | None = None,
+    event_ids: str | int | Sequence[str | int] | None = None,
+    question_ids: str | Sequence[str] | None = None,
+    tx_hash: str | Sequence[str] | None = None,
+    state: str | Sequence[str] | None = None,
+    show_in_frontend: bool | None = None,
+    creator: str | Sequence[str] | None = None,
+    order: str | None = None,
+    ascending: bool | None = None,
+) -> OffsetPaginatedSpec[MarketClarification]:
+    params: dict[str, QueryParamValue] = {}
+    _add_optional_seq(params, "market_id", market_ids)
+    _add_optional_seq(params, "event_id", event_ids)
+    _add_optional_seq(params, "question_id", question_ids)
+    _add_optional_seq(params, "tx_hash", tx_hash)
+    _add_optional_seq(params, "state", state)
+    _add_optional(params, "show_in_frontend", show_in_frontend)
+    _add_optional(params, "creator", _creator_query(creator))
+    _add_optional(params, "order", order)
+    _add_optional(params, "ascending", ascending)
+    for key in ("market_id", "event_id", "question_id", "tx_hash"):
+        values = params.get(key)
+        if isinstance(values, tuple) and len(values) > 100:
+            raise UserInputError(f"{key} accepts at most 100 values.")
+
+    return OffsetPaginatedSpec(
+        service="gamma",
+        path="/market-clarifications",
+        parse_items=MarketClarification.parse_response_list,
+        base_params=params or None,
+        max_page_size=100,
     )
 
 

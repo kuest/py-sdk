@@ -1,5 +1,6 @@
 """Public SDK models."""
 
+from market_sdk.models.gamma.clarification import MarketClarification, MarketClarificationState
 from market_sdk.models.gamma.comment import (
     Comment,
     CommentMedia,
@@ -91,6 +92,8 @@ __all__ = [
     "FeeSchedule",
     "ImageOptimization",
     "Market",
+    "MarketClarification",
+    "MarketClarificationState",
     "MarketEvent",
     "MarketMetrics",
     "MarketOutcome",
