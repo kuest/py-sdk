@@ -29,7 +29,6 @@ _NOTIFICATION_ADAPTER: TypeAdapter[Notification] = TypeAdapter(Notification)
 def _open_order_payload(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "asset_id": "8501497",
-        "associate_trades": ["trade-1"],
         "created_at": 1700000000000,
         "expiration": 1800000000,
         "id": "order-1",
@@ -282,11 +281,9 @@ def test_open_order_rejects_unknown_side() -> None:
         OpenOrder.parse_response(_open_order_payload(side="HOLD"))
 
 
-def test_open_order_defaults_associate_trades_to_empty_tuple() -> None:
-    payload = _open_order_payload()
-    payload.pop("associate_trades")
-    order = OpenOrder.parse_response(payload)
-    assert order.associate_trades == ()
+def test_open_order_parses_without_associated_trades() -> None:
+    order = OpenOrder.parse_response(_open_order_payload())
+    assert order.id == "order-1"
 
 
 def test_maker_order_validates_required_fields() -> None:
