@@ -19,7 +19,6 @@ from market_sdk._internal.rfq import RfqQuoterSession
 from market_sdk._internal.streams.clob.market import ClobMarketStreamManager
 from market_sdk._internal.streams.clob.user import ClobUserStreamManager
 from market_sdk._internal.streams.perps.market import PerpsMarketStreamManager
-from market_sdk._internal.streams.rtds.manager import RtdsStreamManager
 from market_sdk._internal.streams.sports.manager import SportsStreamManager
 from market_sdk.errors import TransportError
 from market_sdk.models import ApiKeyCreds
@@ -121,43 +120,6 @@ def test_clob_user_drops_invalid_frame_and_keeps_socket_open() -> None:
 
     event = asyncio.run(run())
     assert event.type == "order"
-
-
-def test_rtds_drops_invalid_frame_and_keeps_socket_open() -> None:
-    invalid = {"topic": "future_topic", "type": "update", "payload": {"hello": "world"}}
-
-    async def handler(ws: ServerConnection) -> None:
-        await ws.recv()
-        await ws.send(json.dumps(invalid))
-        await ws.send(
-            json.dumps(
-                {
-                    "topic": "crypto_prices",
-                    "type": "update",
-                    "timestamp": "1710000000000",
-                    "payload": {"symbol": "btcusdt", "timestamp": 1710000000000, "value": "1.0"},
-                }
-            )
-        )
-        async for _ in ws:
-            pass
-
-    async def run() -> tuple[int, Any]:
-        from market_sdk.streams import CryptoPricesSpec  # pyright: ignore[reportDeprecated]
-
-        async with ws_server(handler) as url:
-            mgr = RtdsStreamManager(url=url)
-            try:
-                handle = await mgr.subscribe(CryptoPricesSpec(topic="prices.crypto.binance"))  # pyright: ignore[reportDeprecated]
-                event = await _next_event(handle)
-                await handle.close()
-                return mgr.dropped_events, event
-            finally:
-                await mgr.close()
-
-    dropped, event = asyncio.run(run())
-    assert dropped == 1
-    assert event.type == "update"
 
 
 def test_sports_drops_invalid_frame_and_keeps_socket_open() -> None:

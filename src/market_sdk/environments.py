@@ -120,6 +120,8 @@ def configured_environment(
     gamma_url: str,
     data_url: str,
     rpc_url: str,
+    realtime_ws_url: str | None = None,
+    rtds_ws_url: str | None = None,
 ) -> Environment:
     """Use integrator-approved SDK endpoints with the local contract configuration."""
     rest_urls = (clob_url, relayer_url, gamma_url, data_url, rpc_url)
@@ -127,9 +129,13 @@ def configured_environment(
         raise ValueError("SDK REST endpoints must use HTTPS")
     if not clob_ws_url.startswith("wss://"):
         raise ValueError("SDK CLOB WebSocket endpoint must use WSS")
+    for url in (realtime_ws_url, rtds_ws_url):
+        if url is not None and not url.startswith("wss://"):
+            raise ValueError("SDK live-data WebSocket endpoints must use WSS")
     base_ws = clob_ws_url.rstrip("/")
+    base = PRODUCTION._config  # pyright: ignore[reportPrivateUsage]
     config = replace(
-        PRODUCTION._config,  # pyright: ignore[reportPrivateUsage]
+        base,
         clob_url=clob_url,
         clob_market_ws_url=f"{base_ws}/ws/market",
         clob_user_ws_url=f"{base_ws}/ws/user",
@@ -137,6 +143,8 @@ def configured_environment(
         gamma_url=gamma_url,
         data_url=data_url,
         rpc_url=rpc_url,
+        realtime_ws_url=realtime_ws_url or base.realtime_ws_url,
+        rtds_ws_url=rtds_ws_url or base.rtds_ws_url,
     )
     return _create_environment(name="configured", config=config)
 

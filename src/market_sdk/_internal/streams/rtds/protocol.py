@@ -1,26 +1,14 @@
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, assert_never
+from typing import Any
 
 from market_sdk.models.rtds_events import (
-    CommentCreatedEvent,
-    CommentRemovedEvent,
-    CryptoPricesBinanceEvent,
-    CryptoPricesChainlinkEvent,
-    CryptoPricesChainlinkTwapEvent,
-    EquityPricesSubscribeEvent,
-    EquityPricesUpdateEvent,
     ReactionCreatedEvent,
     ReactionRemovedEvent,
     RtdsEvent,
-    api_topic_to_wire,
 )
 from market_sdk.streams._specs import (
     CommentsSpec,
-    CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
-    CryptoPricesChainlinkTwapWindowSeconds,
-    CryptoPricesSpec,  # pyright: ignore[reportDeprecated]
-    EquityPricesSpec,  # pyright: ignore[reportDeprecated]
     RtdsSpec,
 )
 
@@ -38,28 +26,8 @@ class RtdsServerSubscription:
 
 
 def server_subscriptions_for(spec: RtdsSpec) -> tuple[RtdsServerSubscription, ...]:
-    if isinstance(spec, CommentsSpec):
-        types = spec.types if spec.types else _DEFAULT_COMMENT_TYPES
-        return tuple(RtdsServerSubscription(topic="comments", type=t) for t in types)
-    if isinstance(spec, CryptoPricesChainlinkTwapSpec):  # pyright: ignore[reportDeprecated]
-        return (
-            RtdsServerSubscription(
-                topic=_twap_wire_topic(spec.window_seconds),
-                type="update",
-            ),
-        )
-    if isinstance(spec, CryptoPricesSpec | EquityPricesSpec):  # pyright: ignore[reportUnnecessaryIsInstance, reportDeprecated]
-        wire = api_topic_to_wire(spec.topic)
-        return (RtdsServerSubscription(topic=wire, type="update"),)
-    assert_never(spec)
-
-
-def _twap_wire_topic(window_seconds: CryptoPricesChainlinkTwapWindowSeconds) -> str:
-    if window_seconds == 30:
-        return "crypto_prices_twap_thirty"
-    if window_seconds == 60:
-        return "crypto_prices_twap_sixty"
-    assert_never(window_seconds)
+    types = spec.types if spec.types else _DEFAULT_COMMENT_TYPES
+    return tuple(RtdsServerSubscription(topic="comments", type=t) for t in types)
 
 
 def derive_state(subs: Iterable[RtdsSpec]) -> dict[str, RtdsServerSubscription]:
@@ -99,13 +67,7 @@ def diff_state_frames(
 
 
 def matcher_for(spec: RtdsSpec) -> Callable[[RtdsEvent], bool]:
-    if isinstance(spec, CommentsSpec):
-        return _comments_matcher(spec)
-    if isinstance(spec, CryptoPricesChainlinkTwapSpec):  # pyright: ignore[reportDeprecated]
-        return _twap_matcher(spec)
-    if isinstance(spec, CryptoPricesSpec):  # pyright: ignore[reportDeprecated]
-        return _crypto_matcher(spec)
-    return _equity_matcher(spec)
+    return _comments_matcher(spec)
 
 
 def _comments_matcher(spec: CommentsSpec) -> Callable[[RtdsEvent], bool]:
@@ -116,11 +78,6 @@ def _comments_matcher(spec: CommentsSpec) -> Callable[[RtdsEvent], bool]:
     needs_parent_check = parent_id is not None or parent_type is not None
 
     def matches(event: RtdsEvent) -> bool:
-        if not isinstance(
-            event,
-            CommentCreatedEvent | CommentRemovedEvent | ReactionCreatedEvent | ReactionRemovedEvent,
-        ):
-            return False
         if event.type not in allowed_types:
             return False
         if not needs_parent_check:
@@ -133,47 +90,5 @@ def _comments_matcher(spec: CommentsSpec) -> Callable[[RtdsEvent], bool]:
             if payload_parent is None or str(payload_parent) != parent_id_str:
                 return False
         return not (parent_type is not None and payload.parent_entity_type != parent_type)
-
-    return matches
-
-
-def _crypto_matcher(spec: CryptoPricesSpec) -> Callable[[RtdsEvent], bool]:  # pyright: ignore[reportDeprecated]
-    expected_topic = spec.topic
-    allowed_symbols = frozenset(spec.symbols) if spec.symbols else None
-
-    def matches(event: RtdsEvent) -> bool:
-        if not isinstance(event, CryptoPricesBinanceEvent | CryptoPricesChainlinkEvent):
-            return False
-        if event.topic != expected_topic:
-            return False
-        return not (allowed_symbols is not None and event.payload.symbol not in allowed_symbols)
-
-    return matches
-
-
-def _twap_matcher(spec: CryptoPricesChainlinkTwapSpec) -> Callable[[RtdsEvent], bool]:  # pyright: ignore[reportDeprecated]
-    expected_window = spec.window_seconds
-    allowed_symbols = frozenset(spec.symbols) if spec.symbols else None
-
-    def matches(event: RtdsEvent) -> bool:
-        if not isinstance(event, CryptoPricesChainlinkTwapEvent):
-            return False
-        if event.payload.window_seconds != expected_window:
-            return False
-        return not (allowed_symbols is not None and event.payload.symbol not in allowed_symbols)
-
-    return matches
-
-
-def _equity_matcher(spec: EquityPricesSpec) -> Callable[[RtdsEvent], bool]:  # pyright: ignore[reportDeprecated]
-    expected_symbol = spec.symbol.lower()
-    allowed_types = frozenset(spec.types) if spec.types else None
-
-    def matches(event: RtdsEvent) -> bool:
-        if not isinstance(event, EquityPricesUpdateEvent | EquityPricesSubscribeEvent):
-            return False
-        if event.payload.symbol.lower() != expected_symbol:
-            return False
-        return not (allowed_types is not None and event.type not in allowed_types)
 
     return matches

@@ -33,7 +33,6 @@ from market_sdk.streams import (
     EquityPriceSpec,
     EquityTwapPriceSpec,
     KnownPriceSource,
-    MarketSpec,
     PriceSource,
     PriceSpec,
     RealtimePriceSnapshot,
@@ -90,6 +89,7 @@ class Feed:
         self.ignore_unsubscriptions = 0
         self.auth_close_code: int | None = None
         self.ack_provider: str | None = None
+        self.reverse_acks = False
         self.unsubscribed = asyncio.Event()
 
     async def handler(self, ws: ServerConnection) -> None:
@@ -133,10 +133,16 @@ class Feed:
                     elif self.ignore_unsubscriptions:
                         self.ignore_unsubscriptions -= 1
                         continue
-                    for sub in frame["subscriptions"]:
+                    subscriptions = frame["subscriptions"]
+                    for sub in reversed(subscriptions) if self.reverse_acks else subscriptions:
                         channel, symbol = sub["channel"], sub["filter"]["symbol"]
                         op = "subscribed" if frame["op"] == "subscribe" else "unsubscribed"
-                        ack = {"op": op, "rid": frame["rid"], "channel": channel}
+                        ack = {
+                            "op": op,
+                            "rid": frame["rid"],
+                            "channel": channel,
+                            "filter": sub["filter"],
+                        }
                         if op == "subscribed" and self.ack_provider is not None:
                             ack["provider"] = self.ack_provider
                         if op == "subscribed" and symbol in self.reject_symbols:
@@ -685,14 +691,21 @@ def test_canonical_crypto_symbols_are_validated(symbols: Any, spec_type: Any) ->
         spec_type(symbols=symbols)
 
 
-def test_public_client_rejects_entire_authenticated_batch_before_opening() -> None:
+def test_public_prices_subscribe_without_sending_credentials() -> None:
     async def run() -> None:
-        async with AsyncPublicClient() as client:
-            with pytest.raises(UserInputError, match="AsyncSecureClient"):
-                await client.subscribe(
-                    cast(Any, [MarketSpec(asset_ids=["1"]), CryptoPriceSpec(symbols=["btcusd"])])
-                )
-            assert client._market_manager is None
+        feed = Feed()
+        feed.reverse_acks = True
+        async with feed_server(feed) as url:
+            environment = create_environment(
+                name="test", config=replace(PRODUCTION_CONFIG, realtime_ws_url=url)
+            )
+            async with (
+                AsyncPublicClient(environment=environment) as client,
+                await client.subscribe(CryptoPriceSpec(symbols=["btcusd", "ethusd"])) as prices,
+            ):
+                event = await asyncio.wait_for(anext(prices), 1)
+                assert event.payload.symbol in ("btcusd", "ethusd")
+                assert not feed.operations("auth")
 
     asyncio.run(run())
 
