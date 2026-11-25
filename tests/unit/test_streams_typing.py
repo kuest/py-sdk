@@ -9,11 +9,7 @@ from typing import Any, assert_type
 from market_sdk import AsyncPublicClient, AsyncSecureClient
 from market_sdk.streams import (
     CryptoPriceEvent,
-    CryptoPricesChainlinkTwapEvent,
-    CryptoPricesChainlinkTwapSpec,  # pyright: ignore[reportDeprecated]
-    CryptoPricesEvent,
     CryptoPriceSpec,
-    CryptoPricesSpec,  # pyright: ignore[reportDeprecated]
     CryptoTwapPriceEvent,
     CryptoTwapPriceSpec,
     EquityPriceEvent,
@@ -133,36 +129,36 @@ async def check_authenticated_price_typing(client: AsyncSecureClient) -> None:
 
 
 async def _check_async_public_twap_typing(client: AsyncPublicClient) -> None:
-    spec = CryptoPricesChainlinkTwapSpec(window_seconds=30)  # pyright: ignore[reportDeprecated]
+    spec = CryptoTwapPriceSpec(symbols=["btcusd"])  # pyright: ignore[reportDeprecated]
 
     assert_type(
         await client.subscribe(spec),
-        SubscriptionHandle[CryptoPricesChainlinkTwapEvent],
+        SubscriptionHandle[PriceEvent],
     )
     assert_type(
         await client.subscribe([spec]),
-        SubscriptionHandle[CryptoPricesChainlinkTwapEvent],
+        SubscriptionHandle[PriceEvent],
     )
     assert_type(
-        await client.subscribe(CryptoPricesSpec(topic="prices.crypto.chainlink")),  # pyright: ignore[reportDeprecated]
-        SubscriptionHandle[CryptoPricesEvent],
+        await client.subscribe(CryptoPriceSpec(symbols=["btcusd"])),  # pyright: ignore[reportDeprecated]
+        SubscriptionHandle[PriceEvent],
     )
 
 
 async def _check_async_secure_twap_typing(client: AsyncSecureClient) -> None:
-    spec = CryptoPricesChainlinkTwapSpec(window_seconds=60)  # pyright: ignore[reportDeprecated]
+    spec = CryptoTwapPriceSpec(symbols=["btcusd"])  # pyright: ignore[reportDeprecated]
 
     assert_type(
         await client.subscribe(spec),
-        SubscriptionHandle[CryptoPricesChainlinkTwapEvent],
+        SubscriptionHandle[CryptoTwapPriceEvent],
     )
     assert_type(
         await client.subscribe([spec]),
-        SubscriptionHandle[CryptoPricesChainlinkTwapEvent],
+        SubscriptionHandle[CryptoTwapPriceEvent],
     )
     assert_type(
-        await client.subscribe(CryptoPricesSpec(topic="prices.crypto.chainlink")),  # pyright: ignore[reportDeprecated]
-        SubscriptionHandle[CryptoPricesEvent],
+        await client.subscribe(CryptoPriceSpec(symbols=["btcusd"])),  # pyright: ignore[reportDeprecated]
+        SubscriptionHandle[CryptoPriceEvent],
     )
 
 

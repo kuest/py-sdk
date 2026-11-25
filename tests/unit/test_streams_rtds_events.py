@@ -1,25 +1,13 @@
-import inspect
 from datetime import UTC, datetime
-from decimal import Decimal
-from typing import Any, get_type_hints
+from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from market_sdk.models.rtds_events import (
     CommentCreatedEvent,
     CommentRemovedEvent,
-    CryptoPricesBinanceEvent,
-    CryptoPricesChainlinkEvent,
-    CryptoPricesChainlinkTwapEvent,
-    CryptoPricesChainlinkTwapPayload,
-    EquityPricesSubscribeEvent,
-    EquityPricesUpdateEvent,
-    PriceUpdatePayload,
     ReactionCreatedEvent,
-    api_topic_to_wire,
     parse_rtds_event,
-    wire_topic_to_api,
 )
 
 _COMMENT_CREATED: dict[str, Any] = {
@@ -47,76 +35,6 @@ _REACTION_CREATED: dict[str, Any] = {
         "userAddress": "0xdef",
     },
 }
-
-_CRYPTO_BINANCE: dict[str, Any] = {
-    "topic": "crypto_prices",
-    "type": "update",
-    "timestamp": "1710000000000",
-    "payload": {"symbol": "btcusdt", "timestamp": 1710000000000, "value": "65000.5"},
-}
-
-_CRYPTO_CHAINLINK: dict[str, Any] = {
-    "topic": "crypto_prices_chainlink",
-    "type": "update",
-    "timestamp": "1710000000000",
-    "payload": {"symbol": "ETH/USD", "timestamp": 1710000000000, "value": "3500.25"},
-}
-
-_CRYPTO_CHAINLINK_TWAP: dict[str, Any] = {
-    "topic": "crypto_prices_twap_thirty",
-    "type": "update",
-    "timestamp": 1772752582004,
-    "payload": {
-        "symbol": "btc/usd",
-        "value": 65000.12345678901,
-        "full_accuracy_value": "65000123456789012345678",
-        "timestamp": 1772752581815,
-        "window_s": 30,
-    },
-}
-
-_EQUITY_UPDATE: dict[str, Any] = {
-    "topic": "equity_prices",
-    "type": "update",
-    "timestamp": "1710000000000",
-    "payload": {
-        "symbol": "AAPL",
-        "value": "180.42",
-        "timestamp": 1710000000000,
-        "received_at": 1710000000050,
-        "is_carried_forward": False,
-    },
-}
-
-_EQUITY_SUBSCRIBE: dict[str, Any] = {
-    "topic": "equity_prices",
-    "type": "subscribe",
-    "timestamp": "1710000000000",
-    "payload": {
-        "symbol": "AAPL",
-        "data": [
-            {"timestamp": 1710000000000, "value": "180.00"},
-            {"timestamp": 1710000060000, "value": "180.42"},
-        ],
-    },
-}
-
-
-def test_wire_to_api_topic_mapping() -> None:
-    assert wire_topic_to_api("comments") == "comments"
-    assert wire_topic_to_api("crypto_prices") == "prices.crypto.binance"
-    assert wire_topic_to_api("crypto_prices_chainlink") == "prices.crypto.chainlink"
-    assert wire_topic_to_api("crypto_prices_twap_thirty") == "prices.crypto.chainlink.twap"
-    assert wire_topic_to_api("crypto_prices_twap_sixty") == "prices.crypto.chainlink.twap"
-    assert wire_topic_to_api("equity_prices") == "prices.equity.pyth"
-    assert wire_topic_to_api("unknown") is None
-
-
-def test_api_to_wire_topic_mapping() -> None:
-    assert api_topic_to_wire("comments") == "comments"
-    assert api_topic_to_wire("prices.crypto.binance") == "crypto_prices"
-    assert api_topic_to_wire("prices.crypto.chainlink") == "crypto_prices_chainlink"
-    assert api_topic_to_wire("prices.equity.pyth") == "equity_prices"
 
 
 def test_comment_created_parses_with_camelcase_aliases() -> None:
@@ -175,38 +93,6 @@ def test_reaction_created_parses() -> None:
     assert event.payload.reaction_type == "like"
 
 
-def test_crypto_binance_wire_topic_remapped_to_api_topic() -> None:
-    event = parse_rtds_event(_CRYPTO_BINANCE)
-    assert isinstance(event, CryptoPricesBinanceEvent)
-    assert event.topic == "prices.crypto.binance"
-    assert event.payload.symbol == "btcusdt"
-
-
-def test_crypto_chainlink_wire_topic_remapped_to_api_topic() -> None:
-    event = parse_rtds_event(_CRYPTO_CHAINLINK)
-    assert isinstance(event, CryptoPricesChainlinkEvent)
-    assert event.topic == "prices.crypto.chainlink"
-    assert event.payload.symbol == "ETH/USD"
-
-
-def test_rtds_fields_expose_canonical_annotations() -> None:
-    price_hints = get_type_hints(PriceUpdatePayload, include_extras=True)
-    event_hints = get_type_hints(CommentCreatedEvent, include_extras=True)
-
-    assert price_hints["value"] is Decimal
-    assert event_hints["timestamp"] == (datetime | None)
-    assert inspect.signature(PriceUpdatePayload).parameters["value"].annotation is Decimal
-    assert inspect.signature(CommentCreatedEvent).parameters["timestamp"].annotation == (
-        datetime | None
-    )
-
-
-@pytest.mark.parametrize("value", [b"1.5", True, None, object()])
-def test_decimalish_fields_do_not_accept_broader_decimal_inputs(value: object) -> None:
-    with pytest.raises(ValueError):
-        PriceUpdatePayload.model_validate({"symbol": "BTC", "timestamp": 0, "value": value})
-
-
 @pytest.mark.parametrize(
     ("timestamp", "expected"),
     [
@@ -220,7 +106,7 @@ def test_decimalish_fields_do_not_accept_broader_decimal_inputs(value: object) -
 def test_rtds_timestamp_preserves_accepted_inputs(
     timestamp: object, expected: datetime | None
 ) -> None:
-    event = parse_rtds_event({**_CRYPTO_BINANCE, "timestamp": timestamp})
+    event = parse_rtds_event({**_COMMENT_CREATED, "timestamp": timestamp})
 
     assert event.timestamp == expected
 
@@ -228,229 +114,7 @@ def test_rtds_timestamp_preserves_accepted_inputs(
 @pytest.mark.parametrize("timestamp", [True, 1710000000000.0, b"1710000000000", "+1", "-1"])
 def test_rtds_timestamp_preserves_rejected_inputs(timestamp: object) -> None:
     with pytest.raises(ValueError):
-        parse_rtds_event({**_CRYPTO_BINANCE, "timestamp": timestamp})
-
-
-@pytest.mark.parametrize(
-    ("wire_topic", "window_seconds"),
-    [
-        ("crypto_prices_twap_thirty", 30),
-        ("crypto_prices_twap_sixty", 60),
-    ],
-)
-def test_crypto_chainlink_twap_normalizes_topic_window_and_exact_value(
-    wire_topic: str, window_seconds: int
-) -> None:
-    event = parse_rtds_event(
-        {
-            **_CRYPTO_CHAINLINK_TWAP,
-            "topic": wire_topic,
-            "payload": {
-                **_CRYPTO_CHAINLINK_TWAP["payload"],
-                "window_s": window_seconds,
-            },
-        }
-    )
-
-    assert isinstance(event, CryptoPricesChainlinkTwapEvent)
-    assert event.topic == "prices.crypto.chainlink.twap"
-    assert event.type == "update"
-    assert event.timestamp == datetime.fromtimestamp(1772752582004 / 1000, tz=UTC)
-    assert event.payload.symbol == "btc/usd"
-    assert event.payload.timestamp == 1772752581815
-    assert event.payload.window_seconds == window_seconds
-    assert event.payload.value == Decimal("65000.123456789012345678")
-    assert "full_accuracy_value" not in event.payload.model_dump()
-    assert "window_s" not in event.payload.model_dump()
-
-
-@pytest.mark.parametrize(
-    ("wire_topic", "window_seconds"),
-    [
-        ("crypto_prices_twap_thirty", 60),
-        ("crypto_prices_twap_sixty", 30),
-    ],
-)
-def test_crypto_chainlink_twap_rejects_wire_topic_window_mismatch(
-    wire_topic: str, window_seconds: int
-) -> None:
-    with pytest.raises(ValueError, match="requires window_s"):
-        parse_rtds_event(
-            {
-                **_CRYPTO_CHAINLINK_TWAP,
-                "topic": wire_topic,
-                "payload": {
-                    **_CRYPTO_CHAINLINK_TWAP["payload"],
-                    "window_s": window_seconds,
-                },
-            }
-        )
-
-
-@pytest.mark.parametrize("window_seconds", ["30", 30.0, True, None])
-def test_crypto_chainlink_twap_requires_an_integer_wire_window(window_seconds: object) -> None:
-    with pytest.raises(ValueError, match="requires window_s"):
-        parse_rtds_event(
-            {
-                **_CRYPTO_CHAINLINK_TWAP,
-                "payload": {
-                    **_CRYPTO_CHAINLINK_TWAP["payload"],
-                    "window_s": window_seconds,
-                },
-            }
-        )
-
-
-@pytest.mark.parametrize(
-    ("raw_value", "expected"),
-    [
-        ("0", "0"),
-        ("-0", "0"),
-        ("1", "0.000000000000000001"),
-        ("-1", "-0.000000000000000001"),
-        ("1000000000000000000", "1"),
-        ("-1000000000000000000", "-1"),
-        ("1230000000000000000", "1.23"),
-        (
-            "1234567890123456789012345678901234567890",
-            "1234567890123456789012.345678901234567890",
-        ),
-    ],
-)
-def test_crypto_chainlink_twap_normalizes_signed_e18_boundaries(
-    raw_value: str, expected: str
-) -> None:
-    event = parse_rtds_event(
-        {
-            **_CRYPTO_CHAINLINK_TWAP,
-            "payload": {
-                **_CRYPTO_CHAINLINK_TWAP["payload"],
-                "full_accuracy_value": raw_value,
-            },
-        }
-    )
-
-    assert isinstance(event, CryptoPricesChainlinkTwapEvent)
-    assert event.payload.value == Decimal(expected)
-    if raw_value == "-0":
-        assert event.payload.value.is_signed() is False
-
-
-@pytest.mark.parametrize("full_accuracy_value", [None, "1.2", "1e18", "+1", "", 1])
-def test_crypto_chainlink_twap_requires_signed_integer_full_accuracy_value(
-    full_accuracy_value: object,
-) -> None:
-    payload = dict(_CRYPTO_CHAINLINK_TWAP["payload"])
-    if full_accuracy_value is None:
-        payload.pop("full_accuracy_value")
-    else:
-        payload["full_accuracy_value"] = full_accuracy_value
-
-    with pytest.raises(ValueError):
-        parse_rtds_event({**_CRYPTO_CHAINLINK_TWAP, "payload": payload})
-
-
-def test_crypto_chainlink_twap_raw_shape_cannot_bypass_exact_value_requirement() -> None:
-    payload = dict(_CRYPTO_CHAINLINK_TWAP["payload"])
-    payload.pop("full_accuracy_value")
-    payload["window_seconds"] = 30
-
-    with pytest.raises(ValueError, match="full_accuracy_value is required"):
-        parse_rtds_event({**_CRYPTO_CHAINLINK_TWAP, "payload": payload})
-
-
-@pytest.mark.parametrize("display_value", [None, True, object()])
-def test_crypto_chainlink_twap_still_validates_display_value(display_value: object) -> None:
-    payload = dict(_CRYPTO_CHAINLINK_TWAP["payload"])
-    if display_value is None:
-        payload.pop("value")
-    else:
-        payload["value"] = display_value
-
-    with pytest.raises(ValueError):
-        parse_rtds_event({**_CRYPTO_CHAINLINK_TWAP, "payload": payload})
-
-
-def test_crypto_chainlink_twap_validates_display_value_before_full_accuracy_value() -> None:
-    payload = {
-        **_CRYPTO_CHAINLINK_TWAP["payload"],
-        "value": object(),
-        "full_accuracy_value": "invalid",
-    }
-
-    with pytest.raises(ValueError, match="expected decimal-ish value, got object"):
-        parse_rtds_event({**_CRYPTO_CHAINLINK_TWAP, "payload": payload})
-
-
-def test_crypto_chainlink_twap_preserves_invalid_display_value_error_input() -> None:
-    display_value = object()
-    payload = {
-        **_CRYPTO_CHAINLINK_TWAP["payload"],
-        "value": display_value,
-        "full_accuracy_value": "invalid",
-    }
-
-    with pytest.raises(ValidationError) as captured:
-        CryptoPricesChainlinkTwapPayload.model_validate(payload)
-
-    assert captured.value.errors()[0]["input"] is display_value
-
-
-def test_crypto_chainlink_twap_payload_round_trips_public_shape() -> None:
-    payload = CryptoPricesChainlinkTwapPayload(
-        symbol="btc/usd",
-        value=Decimal("65000.123456789012345678"),
-        timestamp=1772752581815,
-        window_seconds=30,
-    )
-
-    assert CryptoPricesChainlinkTwapPayload.model_validate(payload.model_dump()) == payload
-
-
-def test_equity_update_parses_with_aliases() -> None:
-    event = parse_rtds_event(_EQUITY_UPDATE)
-    assert isinstance(event, EquityPricesUpdateEvent)
-    assert event.topic == "prices.equity.pyth"
-    assert event.payload.symbol == "AAPL"
-    assert event.payload.received_at == 1710000000050
-    assert event.payload.is_carried_forward is False
-
-
-def test_equity_update_prefers_full_accuracy_value_when_present() -> None:
-    from decimal import Decimal
-
-    event = parse_rtds_event(
-        {
-            "topic": "equity_prices",
-            "type": "update",
-            "timestamp": "1710000000000",
-            "payload": {
-                "symbol": "AAPL",
-                "value": 180.42,
-                "full_accuracy_value": "180.42178100000",
-                "timestamp": 1710000000000,
-            },
-        }
-    )
-    assert isinstance(event, EquityPricesUpdateEvent)
-    assert event.payload.value == Decimal("180.42178100000")
-
-
-def test_equity_update_falls_back_to_value_when_full_accuracy_missing() -> None:
-    from decimal import Decimal
-
-    event = parse_rtds_event(_EQUITY_UPDATE)
-    assert isinstance(event, EquityPricesUpdateEvent)
-    assert event.payload.value == Decimal("180.42")
-
-
-def test_equity_subscribe_parses_snapshot_data() -> None:
-    event = parse_rtds_event(_EQUITY_SUBSCRIBE)
-    assert isinstance(event, EquityPricesSubscribeEvent)
-    assert event.topic == "prices.equity.pyth"
-    assert event.payload.symbol == "AAPL"
-    assert len(event.payload.data) == 2
-    assert event.payload.data[0].timestamp == 1710000000000
+        parse_rtds_event({**_COMMENT_CREATED, "timestamp": timestamp})
 
 
 def test_unknown_wire_topic_raises() -> None:

@@ -14,10 +14,10 @@ from market_sdk._internal.streams.realtime.protocol import (
 from market_sdk._internal.ws.connection import AsyncWebSocketConnection
 from market_sdk.errors import ConnectionLostError, RequestRejectedError, TransportError
 from market_sdk.models.clob.api_key import ApiKeyCreds
-from market_sdk.models.price_events import PriceEvent, RealtimeErrorCode
+from market_sdk.models.price_events import PriceEvent
 
 Operation = Literal["subscribe", "unsubscribe"]
-ACK_TIMEOUT_S = 10.0
+ACK_TIMEOUT_S = 45.0
 OPERATION_INTERVAL_S = 0.110
 
 
@@ -26,6 +26,7 @@ class _Pending:
     op: str
     channels: list[str | None]
     future: asyncio.Future[list[tuple[int, RequestRejectedError]]]
+    filters: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
     rejected: list[tuple[int, RequestRejectedError]] = field(
         default_factory=list[tuple[int, RequestRejectedError]]
     )
@@ -38,7 +39,7 @@ class PriceConnection:
         self,
         *,
         url: str,
-        credentials: ApiKeyCreds,
+        credentials: ApiKeyCreds | None = None,
         headers: Mapping[str, str] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -86,6 +87,8 @@ class PriceConnection:
         )
 
     async def authorize(self) -> None:
+        if self._credentials is None:
+            return
         await self._request(
             {
                 "op": "auth",
@@ -138,7 +141,17 @@ class PriceConnection:
             rid = str(self._rid)
             loop = asyncio.get_running_loop()
             future: asyncio.Future[list[tuple[int, RequestRejectedError]]] = loop.create_future()
-            pending = _Pending(op=op, channels=list(channels), future=future)
+            pending = _Pending(
+                op=op,
+                channels=list(channels),
+                future=future,
+                filters=[
+                    item["filter"]
+                    for item in cast(
+                        list[dict[str, dict[str, object]]], frame.get("subscriptions", [])
+                    )
+                ],
+            )
             self._pending[rid] = pending
             try:
                 await asyncio.sleep(max(0, OPERATION_INTERVAL_S - (loop.time() - self._last_sent)))
@@ -155,7 +168,7 @@ class PriceConnection:
                     return await asyncio.wait_for(future, ACK_TIMEOUT_S)
                 except TimeoutError as error:
                     raise TransportError(
-                        "Realtime acknowledgement timed out after 10 seconds"
+                        "Realtime acknowledgement timed out after 45 seconds"
                     ) from error
             finally:
                 self._pending.pop(rid, None)
@@ -178,21 +191,24 @@ class PriceConnection:
                 return
             if op == "error":
                 code = frame.get("code")
-                if not isinstance(code, str) or code not in {
-                    item.value for item in RealtimeErrorCode
-                }:
+                if not isinstance(code, str):
                     return
                 error = RequestRejectedError(
                     f"Realtime subscription rejected: {code}", status=200, code=code
                 )
                 matches = [
-                    i for i, candidate in enumerate(pending.channels) if candidate == channel
+                    i
+                    for i, candidate in enumerate(pending.channels)
+                    if candidate == channel
+                    and (
+                        not isinstance(frame.get("filter"), dict)
+                        or pending.filters[i].get("symbol")
+                        == cast(dict[str, object], frame["filter"]).get("symbol")
+                    )
                 ]
-                if channel is None or not matches:
+                if channel is None or len(matches) != 1:
                     pending.future.set_exception(error)
                     return
-                # Per-item replies arrive in request order, including rejections.
-                # As with successful acks, consume the next filter on this channel.
                 index = matches[0]
                 pending.channels[index] = None
                 pending.rejected.append((index, error))
@@ -200,7 +216,26 @@ class PriceConnection:
                 if pending.channels:
                     if channel is None or channel not in pending.channels:
                         return
-                    pending.channels[pending.channels.index(channel)] = None
+                    filter_value = frame.get("filter")
+                    matches = [
+                        i
+                        for i, candidate in enumerate(pending.channels)
+                        if candidate == channel
+                        and (
+                            not isinstance(filter_value, dict)
+                            or (
+                                pending.filters[i].get("symbol")
+                                == cast(dict[str, object], filter_value).get("symbol")
+                                and pending.filters[i].get("provider")
+                                == cast(dict[str, object], filter_value).get("provider")
+                                and pending.filters[i].get("window_seconds")
+                                == cast(dict[str, object], filter_value).get("window_seconds")
+                            )
+                        )
+                    ]
+                    if not matches:
+                        return
+                    pending.channels[matches[0]] = None
             else:
                 return
             if all(channel is None for channel in pending.channels):

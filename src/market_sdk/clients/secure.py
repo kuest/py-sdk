@@ -2083,6 +2083,9 @@ class SecureClient:
     ) -> Paginator[OpenOrder]:
         """List open orders for the authenticated account.
 
+        Supply the market condition ID in ``market`` when filtering by
+        ``asset_id`` or ``token_id``. Unfiltered reads do not require it.
+
         Returns:
             A paginator over matching open orders.
         """
